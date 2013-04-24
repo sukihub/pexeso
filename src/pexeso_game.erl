@@ -55,7 +55,8 @@
 
 -record(state, {
 	playground,
-	players
+	players,
+	eventManager
 }).
 
 -record(player, {
@@ -99,10 +100,15 @@ init(CardTypes) ->
 
 	Players = dict:new(),
 
+	% start event manager process
+	% TODO zistit co robi link
+	{ok, EventManagerPid} = gen_event:start_link(),
+
 	% create new game and server state
 	State = #state{
 		playground = generate_playground(CardTypes),
-		players = Players
+		players = Players,
+		eventManager = EventManagerPid
 	},
 
 	% standard return
@@ -119,8 +125,10 @@ handle_call({register_player, Name}, From, S) ->
 	},
 
 	State = S#state{ players = dict:store(Name, Player, S#state.players) },
+	{PlayerPid, _} = From,
 
 	% TODO subscribe player to events
+	gen_event:add_handler(S#state.eventManager, {game_feed, make_ref()}, PlayerPid),
 	% TODO broadcast new player
 
 	{reply, ok, State};
@@ -161,6 +169,7 @@ handle_cast({turn_card, Name, CardId}, S) ->
 
 		% reply with action and set new state
 		% TODO broadcast Action
+		gen_event:notify(S#state.eventManager, {Action, Player#player.name}),
 		{noreply, State}
 
 	catch

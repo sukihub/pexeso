@@ -56,7 +56,7 @@
 -record(state, {
 	playground,
 	players,
-	eventManager
+	event_manager
 }).
 
 -record(player, {
@@ -108,7 +108,7 @@ init(CardTypes) ->
 	State = #state{
 		playground = generate_playground(CardTypes),
 		players = Players,
-		eventManager = EventManagerPid
+		event_manager = EventManagerPid
 	},
 
 	% standard return
@@ -127,8 +127,7 @@ handle_call({register_player, Name}, From, S) ->
 	State = S#state{ players = dict:store(Name, Player, S#state.players) },
 	{PlayerPid, _} = From,
 
-	% TODO subscribe player to events
-	gen_event:add_handler(S#state.eventManager, {game_feed, make_ref()}, PlayerPid),
+	gen_event:add_handler(S#state.event_manager, game_feed, PlayerPid),
 	% TODO broadcast new player
 
 	{reply, ok, State};
@@ -162,14 +161,14 @@ handle_cast({turn_card, Name, CardId}, S) ->
 		Action = turned_card(Card, Player#player.last_card),
 
 		% update state based on the action
-		State = #state{
+		State = S#state{
 			playground = update_playground(Action, S#state.playground),
 			players = update_players(S#state.players, Name, update_player(Action, Player))% dict:store(From, , S#state.players)
 		},
 
 		% reply with action and set new state
 		% TODO broadcast Action
-		gen_event:notify(S#state.eventManager, {Action, Player#player.name}),
+		gen_event:notify(S#state.event_manager, {Action, Player#player.name}),
 		{noreply, State}
 
 	catch

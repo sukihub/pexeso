@@ -7,7 +7,8 @@
 	get_playground/1,
 	get_stats/1,
 	get_action/3,
-	apply_action/2
+	apply_action/2,
+	is_finished/1
 ]).
 
 -record(state, {
@@ -91,6 +92,15 @@ apply_action(State, Action) ->
 	}.
 
 %%
+% Returns true if game is done, no cards are left.
+%
+is_finished(State) ->
+	case dict:size(State#state.playground) of
+		0 -> true;
+		_ -> false
+	end.
+
+%%
 % Returns a playground with randomly shuffled pairs of given card types.
 %
 generate_playground(CardTypes) ->
@@ -146,14 +156,14 @@ get_player(Players, Key) ->
 % First card was turned by current player.
 %
 turned_card(C, null) ->	
-	#move{type = turn, card_a = C};
+	#turn{card = C};
 
 %%
 % User tries to turn already turned card.
 % Do nothing.
 %
 turned_card(C, C) -> 
-	#move{type = close, card_a = C};
+	#close{card = C};
 
 %%
 % Second card was turned, and both have same values V.
@@ -161,22 +171,22 @@ turned_card(C, C) ->
 % Continues current player.
 %
 turned_card({C1, V} = CardA, {C2, V} = CardB) when C1 /= C2 -> 
-	#move{type = pick, card_a = CardA, card_b = CardB};
+	#pick{card_a = CardA, card_b = CardB};
 
 %%
 % Second card was turned, cards have different values V1 and V2.
 % Continues next player.
 %
 turned_card(CardA, CardB) ->
-	#move{type = fail, card_a = CardA, card_b = CardB}.
+	#fail{card_a = CardA, card_b = CardB}.
 
 %%
 % If player picked cards, remove them from the playground.
 %
-update_playground(Move = #move{type = pick}, Playground) ->
+update_playground(Move = #pick{}, Playground) ->
 
-	{C1, _} = Move#move.card_a,
-	{C2, _} = Move#move.card_b,
+	{C1, _} = Move#pick.card_a,
+	{C2, _} = Move#pick.card_b,
 
 	dict:erase(C1, dict:erase(C2, Playground));
 
@@ -194,7 +204,7 @@ update_players(Players, Key, Player) ->
 %%
 % Add 1 turn to the current user.
 %
-update_player(#move{type = turn, card_a = Card}, Player) -> 
+update_player(#turn{card = Card}, Player) -> 
 	Player#player{
 		turns = Player#player.turns + 1,
 		last_card = Card
@@ -203,7 +213,7 @@ update_player(#move{type = turn, card_a = Card}, Player) ->
 %%
 % Just close opened card.
 %
-update_player(#move{type = close}, Player) -> 
+update_player(#close{}, Player) -> 
 	Player#player{
 		last_card = null
 	};
@@ -211,7 +221,7 @@ update_player(#move{type = close}, Player) ->
 %%
 % Add 1 turn and 1 pick to the current user.
 %
-update_player(#move{type = pick}, Player) -> 
+update_player(#pick{}, Player) -> 
 	Player#player{
 		turns = Player#player.turns + 1,
 		picks = Player#player.picks + 1,
@@ -221,7 +231,7 @@ update_player(#move{type = pick}, Player) ->
 %%
 % Add 1 turn to the current user.
 %
-update_player(#move{type = fail}, Player) -> 
+update_player(#fail{}, Player) -> 
 	Player#player{
 		turns = Player#player.turns + 1,
 		last_card = null

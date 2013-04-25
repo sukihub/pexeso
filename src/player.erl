@@ -7,7 +7,8 @@
 -export([
 	start_link/2,
 	pexeso_progress/2, 
-	turn_card/2
+	turn_card/2,
+	stop/1
 ]).
 
 -export([ 
@@ -36,6 +37,9 @@ pexeso_progress(Pid, Action) ->
 turn_card(Pid, CardId) ->
 	gen_server:cast(Pid, {turn_card, CardId}).
 
+stop(Pid) ->
+	gen_server:cast(Pid, stop).
+
 % gen server stuff
 
 init({GamePid, Name}) ->
@@ -49,26 +53,29 @@ init({GamePid, Name}) ->
 handle_call(_, _From, State) ->
 	{reply, ok, State}.
 
-handle_cast({pexeso_progress, Action = #action{move = #move{type = turn}}}, State) ->
+handle_cast({pexeso_progress, Action = #action{move = #turn{}}}, State) ->
 	io:format("otocena karticka: ~p~n", [Action]),
 	{noreply, State};
 
-handle_cast({pexeso_progress, Action = #action{move = #move{type = pick}}}, State) ->
+handle_cast({pexeso_progress, Action = #action{move = #pick{}}}, State) ->
 	io:format("zobrate karticky: ~p~n", [Action]),
 	{noreply, State};
 
-handle_cast({pexeso_progress, Action = #action{move = #move{type = fail}}}, State) ->
+handle_cast({pexeso_progress, Action = #action{move = #fail{}}}, State) ->
 	io:format("smola: ~p~n", [Action]),
 	{noreply, State};
 
-handle_cast({pexeso_progress, Action = #action{move = #move{type = join}}}, State) ->
+handle_cast({pexeso_progress, Action = #action{move = #join{}}}, State) ->
 	io:format("pridal sa hrac: ~p~n", [Action#action.player]),
 	{noreply, State};
 
-handle_cast({turn_card, CardId}, S) ->
-	pexeso_game:turn_card(S#state.game_pid, S#state.name, CardId),
-	{noreply, S}.	
+handle_cast({turn_card, CardId}, State) ->
+	pexeso_game:turn_card(State#state.game_pid, State#state.name, CardId),
+	{noreply, State};	
 	
+handle_cast(stop, State) ->
+	{stop, normal, State}.
+
 handle_info({'DOWN', _, process, _, _Reason}, _State) ->
 	exit(normal);
 

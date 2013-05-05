@@ -21,6 +21,8 @@
 	card_b
 }).
 
+-record(invalid, {}).
+
 -record(join, {
 	pid
 }).
@@ -31,3 +33,4 @@
 }).
 
 -define(HEARTBEAT_DELAY, 10000).
+-define(CLIENT_WAIT, 1000).

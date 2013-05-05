@@ -32,5 +32,4 @@
 	content
 }).
 
--define(HEARTBEAT_DELAY, 10000).
 -define(CLIENT_WAIT, 1000).

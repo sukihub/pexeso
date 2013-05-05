@@ -4,55 +4,21 @@
 -behaviour(gen_fsm).
 -behaviour(pexeso_progress_listener).
 
-% Sample usage:
-%
-% % Create new pexeso game
-% {ok, Game} = pexeso_game:start(
-%	["John", "Lucy", "Suzi"], % list of player names
-%	[house, car, boat, sun]   % list of card types (== images on cards)
-% ).
-%
-% % Get list of cards available
-% pexeso_game:get_playground(Game). % > [4,3,5,7,1,8,2,6]
-%
-% % Turn some card
-% pexeso_game:turn_card(Game, 5). % > {turn, {5, sun}}
-%
-% % Turn non existing card
-% pexeso_game:turn_card(Game, 9). % > not_found
-%
-% % Turn another correct card
-% pexeso_game:turn_card(Game, 3). % > {fail, {3, boat, 5, sun}}
-%
-% % Lucy's turn
-% pexeso_game:turn_card(Game, 2). % > {turn, {2, boat}}
-%
-% % Card 3 was boat too!
-% pexeso_game:turn_card(Game, 3). % > {pick, {3, 2, boat}}
-%
-% % Get game stats
-% pexeso_game:get_stats(Game). % > [{"Suzi",{turns,0},{picks,0}},
-%                            	    {"Lucy",{turns,2},{picks,1}},
-%	                                {"John",{turns,2},{picks,0}}]
-%
-% % When we'done, stop the game
-% pexeso_game:stop(Game).
-
 -export([
-	start/1, 
+	start/2, 
 
 	set_main/2,
-	set_backup/3,
+	set_backup/5,
 
 	register_player/3,
 	get_playground/1, 
-	get_stats/1,
+	get_stats/1, get_stats/2,
 	turn_card/3,
-	heartbeat/1, 
 
 	pause/1,
 
 	pexeso_progress/2,
+	no_heartbeat/1,
 
 	stop/1
 ]).
@@ -70,18 +36,20 @@
 ]).
 
 -record(state, {
+	name,
 	game,
 	players,
+	other_pid = null,
 	event_manager,
-	other_pid = null
+	heartbeat
 }).
 
 %%
 % PUBLIC INTERFACE
 %
 
-start(CardTypes) when is_list(CardTypes) -> 
-	gen_fsm:start(?MODULE, CardTypes, []).
+start(Name, CardTypes) when is_list(CardTypes) -> 
+	gen_fsm:start(?MODULE, {Name, CardTypes}, []).
 
 %%
 % For state init.
@@ -89,8 +57,8 @@ start(CardTypes) when is_list(CardTypes) ->
 set_main(Pid, BackupPid) ->
 	gen_fsm:sync_send_event(Pid, {set_main, BackupPid}).
 
-set_backup(Pid, Game, Players) ->
-	gen_fsm:sync_send_event(Pid, {set_backup, Game, Players}).
+set_backup(Pid, Name, Game, Players, HeartbeatPid) ->
+	gen_fsm:sync_send_event(Pid, {set_backup, Name, Game, Players, HeartbeatPid}).
 
 %%
 % For state main.
@@ -101,8 +69,8 @@ register_player(Pid, Name, PlayerPid) ->
 turn_card(Pid, Name, Card) ->
 	gen_fsm:send_event(Pid, {turn_card, Name, Card}).
 
-heartbeat(Pid) ->
-	gen_fsm:sync_send_event(Pid, heartbeat).
+no_heartbeat(Pid) ->
+	gen_fsm:send_event(Pid, no_heartbeat).
 
 %%
 % For state backup.
@@ -119,6 +87,9 @@ get_playground(Pid) ->
 get_stats(Pid) ->
 	gen_fsm:sync_send_all_state_event(Pid, get_stats).
 
+get_stats(Pid, Timeout) ->
+	gen_fsm:sync_send_all_state_event(Pid, get_stats, Timeout).
+
 pause(Pid) ->
 	gen_fsm:send_all_state_event(Pid, pause).
 
@@ -132,17 +103,21 @@ stop(Pid) ->
 %%
 % Pexeso game initialization.
 %
-init(CardTypes) -> 
+init({Name, CardTypes}) -> 
 
 	% start event manager process
 	{ok, EventManagerPid} = gen_event:start_link(),
+	% start heartbeat process
+	{ok, HeartbeatPid} = pexeso_game_heartbeat:start_link(self()),
 
 	% create new pexeso game
 	% and add event manager
 	State = #state{ 
+		name = Name,
 		game = pexeso_lib:create(CardTypes),
 		players = dict:new(),
-		event_manager = EventManagerPid 
+		event_manager = EventManagerPid,
+		heartbeat = HeartbeatPid
 	},
 
 	% go to state idle
@@ -162,10 +137,11 @@ idle({set_main, BackupPid}, _From, S) ->
 %%
 % Tells this game to be backup. Can only by sent by respective main game.
 %
-idle({set_backup, Game, Players}, {From, _}, S) ->
+idle({set_backup, Name, Game, Players, HeartbeatPid}, {From, _}, S) ->
 
 	% put game and players into state
-	State = S#state{ 
+	State = S#state{
+		name = Name, 
 		game = Game,
 		players = Players,
 		other_pid = From
@@ -173,6 +149,9 @@ idle({set_backup, Game, Players}, {From, _}, S) ->
 
 	% register all players in gen_event
 	[ start_notifying(player, PlayerPid, S#state.event_manager) || {_, PlayerPid} <- dict:to_list(Players) ],
+
+	% start sending heartbeat
+	pexeso_game_heartbeat:set_sending(S#state.heartbeat, HeartbeatPid),
 
 	{reply, ok, backup, State};
 
@@ -189,14 +168,6 @@ idle(Message, S) ->
 %%
 % Main state.
 %
-
-%%
-% Received heartbeat from backup game.
-% Only allowed to be called by backup game process itself.
-%
-main(heartbeat, {BackupPid, _}, S) when S#state.other_pid == BackupPid ->
-	io:format("Backup is ok!~n"),
-	{reply, ok, main, S};
 
 main(Message, _From, S) ->
 	unexpected(Message, main),
@@ -244,6 +215,29 @@ main({turn_card, Name, CardId}, S) ->
 
 		throw:player_not_found -> 
 			{next_state, main, S}
+
+	end;
+
+%%
+% Received heartbeat from backup game.
+% Only allowed to be called by backup game process itself.
+%
+main(no_heartbeat, S) ->
+	
+	% contact init server to see what the hell is going on
+	case tester:backup_down(S#state.name, S#state.other_pid) of
+
+		% ignore no_heartbeat event, backup works as expected
+		nope -> 
+			{next_state, main, S};
+
+		% here is your new backup
+		{yop, NewBackupPid} ->
+
+			% assign new backup, notify players
+			State = new_backup(NewBackupPid, S),
+
+			{next_state, main, State}
 
 	end;
 
@@ -295,23 +289,17 @@ backup({pexeso_progress, Action = #action{}}, S) ->
 backup(Message = {Event, _, _}, S) when Event == register_player; Event == turn_card ->
 	
 	% contact init server to see what the hell is going on
-	% Response = nothing;
-	Response = {advance, S#state.other_pid},
-	
-	case Response of
+	case tester:main_down(S#state.name, S#state.other_pid) of
 
 		% ignore gameplay event, main works as expected
-		nothing -> 
+		nope -> 
 			{next_state, backup, S};
 
 		% you are main a here is your new backup
-		{advance, NewBackupPid} ->
+		{yop, NewBackupPid} ->
 
-			% advance self to main, and push game state to new backup
-			State = advance_to_main(NewBackupPid, S),
-
-			% notify players about the change
-			[ player:new_servers(PlayerPid, self(), NewBackupPid) || {_, PlayerPid} <- dict:to_list(State#state.players) ],
+			% assign new backup, notify players
+			State = new_backup(NewBackupPid, S),
 
 			% resend original message to self (will already be in main state)
 			gen_fsm:send_event(self(), Message),
@@ -319,13 +307,6 @@ backup(Message = {Event, _, _}, S) when Event == register_player; Event == turn_
 			{next_state, main, State}
 
 	end;
-
-%%
-% Heartbeat timeout.
-%
-backup(timeout, S) ->
-	pexeso_game:heartbeat(S#state.other_pid),
-	{next_state, backup, S};
 
 backup(Message, S) ->
 	unexpected(Message, backup),
@@ -406,12 +387,29 @@ unexpected(Message, State) ->
 	io:format("Game ~p received unknown event ~p while in state ~p~n", [self(), Message, State]).
 
 %%
+% Assigns new backup to this game and notifies players about the change.
+%
+new_backup(NewBackupPid, S) ->
+
+	% advance self to main, and push game state to new backup
+	State = advance_to_main(NewBackupPid, S),
+
+	% notify players about the change
+	[ player:new_servers(PlayerPid, self(), NewBackupPid) || {_, PlayerPid} <- dict:to_list(State#state.players) ],
+
+	State.
+
+
+%%
 % Sets this game to be main game.
 %
 advance_to_main(BackupPid, S) ->
 
+	% wait for heartbeats from backup
+	pexeso_game_heartbeat:set_listening(S#state.heartbeat),
+
 	% send game state to backup
-	pexeso_game:set_backup(BackupPid, S#state.game, S#state.players),
+	pexeso_game:set_backup(BackupPid, S#state.name, S#state.game, S#state.players, S#state.heartbeat),
 	
 	% send all game progress events to backup game
 	start_notifying(pexeso_game, BackupPid, S#state.event_manager),

@@ -5,7 +5,7 @@
 -behaviour(pexeso_progress_listener).
  
 -export([
-	start_link/3,
+	start/3,
 	pexeso_progress/2, 
 	turn_card/2,
 	new_servers/3,
@@ -34,8 +34,8 @@
 
 % PUBLIC INTERFACE
 
-start_link(GamePid, BackupPid, Name) ->
-	gen_fsm:start_link(?MODULE, {GamePid, BackupPid, Name}, []).
+start(GamePid, BackupPid, Name) ->
+	gen_fsm:start(?MODULE, {GamePid, BackupPid, Name}, []).
 
 pexeso_progress(Pid, Action) ->
 	gen_fsm:send_all_state_event(Pid, {pexeso_progress, Action}).
@@ -141,6 +141,10 @@ waiting_backup(Message, _From, S) ->
 
 handle_event({pexeso_progress, Action = #action{move = #turn{}}}, _StateName, State) ->
 	io:format("otocena karticka: ~p~n", [Action]),
+	{next_state, playing, State};
+
+handle_event({pexeso_progress, Action = #action{move = #close{}}}, _StateName, State) ->
+	io:format("zatvorena karticka: ~p~n", [Action]),
 	{next_state, playing, State};
 
 handle_event({pexeso_progress, Action = #action{move = #pick{}}}, _StateName, State) ->

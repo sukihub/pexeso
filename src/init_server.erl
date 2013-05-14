@@ -1,11 +1,16 @@
 -module(init_server).
 -behaviour(gen_server).
+-define(DELAY, 10000).
 
 -export([
-	start/0,
-	create_game/2, 
+	start/2,
+	gossip_games/2,
+	%gossip_game_servers/4,
+	create_game/2,
+	get_time/1,	
 	register_game_server/2,
-	stop/1
+	stop/1,
+	create_gossip_message/4
 ]).
 
 -export([ 
@@ -18,6 +23,9 @@
 ]).
 
 -record(state, {
+	id,
+	vector_clock,
+	init_servers_count,
 	init_servers,
 	games,
 	game_servers
@@ -32,19 +40,26 @@
 -record(game_server, {
 	pid,
 	games_count = 0,
-	backup_count = 0
+	backup_count = 0,
+	dead = 0
 }).
 
 % public api
 
-start() ->
-	gen_server:start(?MODULE, [], []).
+start(Id,ServersCount) ->
+	gen_server:start_link(?MODULE, [Id,ServersCount], []).
 
 create_game(Pid, Name) ->
 	gen_server:cast(Pid, {create_game, Name}).
 	
 register_game_server(Pid, GameServerPid) ->
 	gen_server:cast(Pid, {register_game_server, GameServerPid}).
+	
+get_time(Pid) ->
+	gen_server:cast(Pid, {get_time}).
+	
+gossip_games(Pid, Msg) ->
+	gen_server:cast(Pid, {gossip_games, Msg}).
 
 stop(Pid) ->
 	gen_server:cast(Pid, stop).
@@ -54,11 +69,14 @@ stop(Pid) ->
 % inicializia
 % nacita sa zoznam Pidciek zo suboru
 % do suboru sa prida novovytvoreny (pre ucely testovania takto)
-init([]) ->
+init([Id,ServersCount]) ->
 	Pid = self(),
-	writeline("init_servers.conf",Pid),
-	InitServers = readlines("init_servers.conf"),
-	{ok, #state{init_servers = InitServers, games = [], game_servers = []}}.
+	%writeline("init_servers.conf",Pid),
+	%InitServers = readlines("init_servers.conf"),
+	VectorClock = dict:new(),
+	State = #state{init_servers = [], games = [], game_servers = [], vector_clock = dict:store(Id,0,VectorClock), id = Id, init_servers_count = ServersCount},
+	erlang:send_after(?DELAY, self(), trigger),
+	{ok, State}.
  
 
 handle_call(_, _From, State) ->
@@ -73,10 +91,15 @@ handle_cast({create_game,Name}, State) ->
 	{ok, NewGamePid} = game:start(), 
 	{ok, NewBackupPid} = game:start(), 
 	Games = State#state.games,
+	Id = State#state.id,
 	NewGame = #game{name = Name, game_pid = NewGamePid, backup_pid = NewBackupPid},
-	NewState = State#state{games = [NewGame | Games]},
+	
+	VectorClock = State#state.vector_clock,
+	
+	NewState = State#state{games = [NewGame | Games], vector_clock = time_update(Id, VectorClock)},
 	%io:format("Unexpected message: ~p~n", [NewState]),
-	{noreply, State};
+	
+	{noreply, NewState};
 
 % register_game_server
 % zaregistruje novy game server	
@@ -86,12 +109,46 @@ handle_cast({register_game_server, GameServerPid}, State) ->
 	NewState = State#state{game_servers = [NewGameServer | GameServers]},
 	%io:format("Unexpected message: ~p~n", [NewState]),
 	{noreply, NewState};
+
+handle_cast({get_time}, State) ->
+	VectorClock = State#state.vector_clock,
+	Id = State#state.id,
+	%CurrentTime = dict:fetch(self(),VectorClock),
+	CurrentTime = time_get(Id, VectorClock),
+	io:format("Unexpected message: ~p~n", [CurrentTime]),
+	{noreply, State};
+	
+handle_cast({gossip_games, Msg}, State) ->
+	{FromGames, FromId, FromTime} = Msg,
+	VectorClock = State#state.vector_clock,
+	LocalGames = State#state.games,
+	Id = State#state.id,
+	LocalFromTime = time_get(FromId, VectorClock),
+	io:format("~p Received gossip: ~p ~p ~p ~n", [Id, FromGames, FromId, FromTime]),
+	{RecentTime, RecentGames} = resolve_lists_games(LocalGames, LocalFromTime, FromGames, FromTime),
+	NewState = State#state{games = RecentGames, vector_clock = dict:store(FromId, RecentTime, VectorClock)},
+	{noreply, NewState};
 	
 handle_cast(stop, State) ->
 	{stop, normal, State}.
 
 handle_info({'DOWN', _, process, _, _Reason}, _State) ->
 	exit(normal);
+	
+handle_info(trigger, State) ->
+	
+	Games = State#state.games,
+	Id = State#state.id,
+	VectorClock = State#state.vector_clock,
+	Count = State#state.init_servers_count,
+	CurrentTime = time_get(Id, VectorClock),
+	{ToPid, Msg} = create_gossip_message(Id, Games, CurrentTime, Count), %FromId, List, CurrentTime, InitServersCount
+	?MODULE:gossip_games(ToPid, Msg),
+	
+	io:format("init_server_~p: ~p~n", [Id, length(Games)]),
+	erlang:send_after(?DELAY, self(), trigger),
+	
+	{noreply, State};
 
 handle_info(Info, State) ->
 	io:format("Unexpected message: ~p~n", [Info]),
@@ -116,6 +173,36 @@ get_all_lines(Device, Accum) ->
         eof  -> file:close(Device), Accum;
         {ok, [N]} -> get_all_lines(Device, Accum ++ [list_to_pid(N)])
     end.
+	
+	
+time_update(Id, VectorClock) ->
+	CurrentTime = dict:fetch(Id,VectorClock),
+	dict:store(Id,CurrentTime+1,VectorClock).
+	%NewState = State#state{vector_clock = dict:store(self(),CurrentTime+1)},
+	%NewState.
+	
+time_get(Id, VectorClock) ->
+	case dict:is_key(Id, VectorClock) of
+		true -> 
+			dict:fetch(Id,VectorClock);
+		false ->
+			%NewVectorClock = dict:store(Id,0,VectorClock),
+			%{dict:fetch(Id,NewVectorClock), NewVectorClock}
+			0
+		end.
+	
+	
+resolve_lists_games(CurrentGames,CurrentTime,ColleaguesGames,ColleaguesTime) ->
+	case CurrentTime >= ColleaguesTime of
+		true -> {CurrentTime, CurrentGames};
+		false -> {ColleaguesTime, ColleaguesGames}
+	end.
+
+create_gossip_message(FromId, List, CurrentTime, InitServersCount) ->
+	ToId = random:uniform(InitServersCount),
+	ToPid = list_to_atom("init_server"++lists:flatten(io_lib:format("~p", [ToId]))),
+	Msg = {List, FromId, CurrentTime},
+	{ToPid, Msg}.
 
 % najdenie game servera s najmenej hrami	
 find_least_busy_game_server([]) ->

@@ -38,7 +38,7 @@
 % public api
 
 start() ->
-	gen_server:start_link(?MODULE, [], []).
+	gen_server:start(?MODULE, [], []).
 
 create_game(Pid, Name) ->
 	gen_server:cast(Pid, {create_game, Name}).

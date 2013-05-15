@@ -5,9 +5,9 @@
 -export([
 	start_link/2,
 	gossip_games/2,
-	create_game/3,
+	create_game/2,
 	get_time/1,	
-	register_game_server/2,
+	register_game_server/1,
 	stop/1,
 	create_gossip_message/4
 ]).
@@ -38,7 +38,6 @@
 -record(game_server, {
 	pid,
 	games_count = 0,
-	backup_count = 0,
 	dead = 0
 }).
 
@@ -47,11 +46,11 @@
 start_link(Name, OthersNames) ->
 	gen_server:start_link({local, Name}, ?MODULE, {Name, OthersNames}, []).
 
-create_game(Pid, Name, Cards) ->
-	gen_server:cast(Pid, {create_game, Name, Cards}).
+create_game(Name, Cards) ->
+	gen_server:cast(pexeso_supervisor:pick_init_server(), {create_game, Name, Cards}).
 	
-register_game_server(Pid, GameServerPid) ->
-	gen_server:cast(Pid, {register_game_server, GameServerPid}).
+register_game_server(GameServerPid) ->
+	gen_server:cast(pexeso_supervisor:pick_init_server(), {register_game_server, GameServerPid}).
 	
 get_time(Pid) ->
 	gen_server:cast(Pid, {get_time}).
@@ -91,32 +90,23 @@ init({Name, OthersNames}) ->
 handle_call(_, _From, State) ->
 	{reply, ok, State}.
 
+
 % create_game
 %
 handle_cast({create_game, Name, Cards}, State) ->
 	
-	% TODO uistit sa, ze GameServer a BackupServer su ROZNE!!
-	% mozno bude lepsie, ak sa v jednom kroku return-nu obe
-	GameServer = find_least_busy_game_server(State#state.game_servers),
-	BackupServer = find_least_busy_game_server(State#state.game_servers),
+	try
 
-	% TODO co ak nie su dostupne ziadne (aspon 2) game servery? 
-	% hodit chybu alebo vratit error
+		Servers = find_least_busy_servers(State#state.game_servers),
+		NewState = initialize_games(Name, Cards, Servers, State),
+		
+		{noreply, NewState}
 
-	% create games
-	NewGamePid = game_server:create_game(GameServer#game_server.pid, Name, Cards), 
-	NewBackupPid = game_server:create_game(BackupServer#game_server.pid, Name, Cards), 
-	pexeso_game:set_main(NewGamePid, NewBackupPid),
-
-	Games = State#state.games,
-	Id = State#state.id,
-	NewGame = #game{name = Name, game_pid = NewGamePid, backup_pid = NewBackupPid},
-	
-	VectorClock = State#state.vector_clock,
-	
-	NewState = State#state{games = [NewGame | Games], vector_clock = time_update(Id, VectorClock)},
-	
-	{noreply, NewState};
+	catch
+		throw:not_enough_game_servers -> 
+			io:format("~p does not have enough game servers to start new game~n", [State#state.id]),
+			{noreply, State}
+	end;
 
 
 % register_game_server
@@ -219,17 +209,58 @@ create_gossip_message(FromId, List, CurrentTime, InitServers) ->
 	{ToPid, Msg}.
 
 
-% najdenie game servera s najmenej hrami	
-find_least_busy_game_server([]) ->
-	nil;
-find_least_busy_game_server([H|T]) ->
-	find_least_busy_game_server(T, H).
-	
-find_least_busy_game_server([], Min) ->
-	Min;	
+% najdenie game serverov s najmenej hrami	
 
-find_least_busy_game_server([H|T], Min) ->
-	case Min#game_server.games_count > H#game_server.games_count of
-		true -> find_least_busy_game_server(T, H);
-		false -> find_least_busy_game_server(T, Min)
-	end.
+find_least_busy_servers([ G1, G2 | Others ]) when G1#game_server.games_count =< G2#game_server.games_count ->
+	find_least_busy_servers(Others, G1, G2, []);
+	
+find_least_busy_servers([ G1, G2 | Others ]) ->
+	find_least_busy_servers(Others, G2, G1, []);
+
+find_least_busy_servers(GameServers) when is_list(GameServers) ->
+	throw(not_enough_game_servers).
+
+find_least_busy_servers([], Min1, Min2, Rest) ->
+	{ Min1, Min2, Rest };	
+
+find_least_busy_servers([ G | Others ], Min1, Min2, Rest) when G#game_server.games_count < Min1#game_server.games_count ->
+	find_least_busy_servers(Others, G, Min1, [ Min2 | Rest ]);
+
+find_least_busy_servers([ G | Others ], Min1, Min2, Rest) when G#game_server.games_count < Min2#game_server.games_count ->
+	find_least_busy_servers(Others, Min1, G, [ Min2 | Rest ]);
+
+find_least_busy_servers([ G | Others ], Min1, Min2, Rest) ->
+	find_least_busy_servers(Others, Min1, Min2, [ G | Rest ]).
+
+
+initialize_games(Name, Cards, { GameServer, BackupServer, OtherServers }, State) ->
+
+	% create games
+	NewGamePid = game_server:create_game(GameServer#game_server.pid, Name, Cards), 
+	NewBackupPid = game_server:create_game(BackupServer#game_server.pid, Name, Cards), 
+	pexeso_game:set_main(NewGamePid, NewBackupPid),
+
+	% update counts of games on both servers
+	NewGameServer = GameServer#game_server{ games_count = GameServer#game_server.games_count + 1 },
+	NewBackupServer = BackupServer#game_server{ games_count = BackupServer#game_server.games_count + 1 },
+
+	% create new game record
+	Games = State#state.games,
+	Id = State#state.id,
+	NewGame = #game{name = Name, game_pid = NewGamePid, backup_pid = NewBackupPid},
+	
+	% update clock
+	VectorClock = State#state.vector_clock,
+	
+	% return updated state
+	State#state{
+		
+		% add new game to the list
+		games = [NewGame | Games],
+
+		% add updated servers to the list of other servers
+		game_servers = [ NewGameServer, NewBackupServer | OtherServers ],
+		
+		% new vector clock
+		vector_clock = time_update(Id, VectorClock)
+	}.

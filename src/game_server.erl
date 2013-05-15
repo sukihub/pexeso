@@ -2,7 +2,7 @@
 -behavior(gen_server).
 
 -export([
-	start_link/1,
+	start_link/0,
 	create_game/3,
 	stop/1
 ]).
@@ -18,14 +18,10 @@
 
 -define(TIMEOUT, 120000).
 
--record(state, {
-	init_servers
-}).
-
 % PUBLIC API
 
-start_link(InitServers) ->
-	gen_server:start_link(?MODULE, InitServers, []).
+start_link() ->
+	gen_server:start_link(?MODULE, nothing, []).
 
 create_game(Pid, Name, Cards) ->
 	gen_server:call(Pid, {create_game, Name, Cards}).
@@ -35,15 +31,10 @@ stop(Pid) ->
 
 % GEN_SERVER
 
-init(InitServers) ->
-
+init(_) ->
 	io:format("Game server ~p stared~n", [self()]),
-
-	random:seed(now()),
-	register(InitServers),
-
-	{ok, #state{ init_servers = InitServers }, ?TIMEOUT}.
-
+	register(),
+	{ok, stateless, ?TIMEOUT}.
 
 handle_call({create_game, Name, Cards}, _From, State) ->
 	{ok, Game} = pexeso_game:start(Name, Cards),
@@ -61,7 +52,7 @@ handle_cast(Message, State) ->
 	{noreply, State, ?TIMEOUT}.
 
 handle_info(timeout, State) ->
-	register(State#state.init_servers),
+	register(),
 	{noreply, State, ?TIMEOUT};
 
 handle_info(Message, State) ->
@@ -78,8 +69,6 @@ code_change(_Old, State, _Extra) ->
 unexpected(Message) ->
 	io:format("Game server ~p received unexpected message ~p~n", [self(), Message]).
 
-register(InitServers) ->
-	Index = random:uniform(length(InitServers)),
-	Init = lists:nth(Index, InitServers),
-	io:format("Registering game server ~p at ~p~n", [self(), Init]),
-	init_server:register_game_server(Init, self()).
+register() ->
+	io:format("Registering game server ~p~n", [self()]),
+	init_server:register_game_server(self()).

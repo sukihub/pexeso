@@ -3,11 +3,18 @@
 
 -export([
 	start_link/0,
+	pick_init_server/0,
 	init/1
 ]).
 
 start_link() ->
+	random:seed(now()),
 	supervisor:start_link({local, ?MODULE}, ?MODULE, nothing).
+
+pick_init_server() ->
+	InitServers = get_init_servers(),
+	I = random:uniform(length(InitServers)),
+	lists:nth(I, InitServers).
 
 init(_) ->
 
@@ -20,7 +27,7 @@ init(_) ->
 			permanent, 5000, supervisor, [ init_servers_supervisor ] },
 
 		{ game_servers,
-			{ game_server_supervisor, start_link, [4, InitServers] },
+			{ game_server_supervisor, start_link, [4] },
 			permanent, 5000, supervisor, [ game_server_supervisor ] }
 
 	]}}.

@@ -2,14 +2,14 @@
 -behavior(supervisor).
 
 -export([
-	start_link/1,
+	start_link/2,
 	new_servers/1,
 
 	init/1
 ]).
 
-start_link(NumberOfServers) ->
-	Result = supervisor:start_link({local, ?MODULE}, ?MODULE, nothing),
+start_link(NumberOfServers, InitServers) ->
+	Result = supervisor:start_link({local, ?MODULE}, ?MODULE, InitServers),
 	new_servers(NumberOfServers),
 	Result.
 
@@ -23,12 +23,12 @@ new_servers(NumberOfServers, Current) when Current < NumberOfServers ->
 new_servers(NumberOfServers, Current) when Current >= NumberOfServers ->
 	ok.
 
-init(_) ->
+init(InitServers) ->
 
 	{ok, {{simple_one_for_one, 10, 60}, [
 
-		{ random_game_server, 
-			{ game_server, start_link, [] }, 
-			permanent, brutal_kill, worker, [ game_server ] }
+		{ game_server, 
+			{ game_server, start_link, [InitServers] }, 
+			permanent, 1000, worker, [ game_server ] }
 
 	] }}.

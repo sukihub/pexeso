@@ -6,7 +6,8 @@
 ]).
 
 start(normal, _Args) ->
-	not_implemented.
+	io:format("Starting entire pexeso application~n", []),
+	pexeso_supervisor:start_link().
 
 stop(_State) ->
 	ok.

@@ -2,7 +2,7 @@
 -behaviour(gen_server).
 
 -export([
-	start/0,
+	start_link/1,
 	create_game/2, 
 	register_game_server/2,
 	stop/1
@@ -37,11 +37,11 @@
 
 % public api
 
-start() ->
-	gen_server:start(?MODULE, [], []).
+start_link(Name) ->
+	gen_server:start_link({local, Name}, ?MODULE, Name, []).
 
-create_game(Pid, Name) ->
-	gen_server:cast(Pid, {create_game, Name}).
+create_game(Pid, Name, Cards) ->
+	gen_server:cast(Pid, {create_game, Name, Cards}).
 	
 register_game_server(Pid, GameServerPid) ->
 	gen_server:cast(Pid, {register_game_server, GameServerPid}).
@@ -54,7 +54,10 @@ stop(Pid) ->
 % inicializia
 % nacita sa zoznam Pidciek zo suboru
 % do suboru sa prida novovytvoreny (pre ucely testovania takto)
-init([]) ->
+init(Name) ->
+	
+	io:format("Init server ~p ~p started~n", [Name, self()]),
+
 	Pid = self(),
 	writeline("init_servers.conf",Pid),
 	InitServers = readlines("init_servers.conf"),
@@ -66,17 +69,27 @@ handle_call(_, _From, State) ->
 
 % create_game
 %
-handle_cast({create_game,Name}, State) ->
+handle_cast({create_game, Name, Cards}, State) ->
+	
+	% TODO uistit sa, ze GameServer a BackupServer su ROZNE!!
+	% mozno bude lepsie, ak sa v jednom kroku return-nu obe
 	GameServer = find_least_busy_game_server(State#state.game_servers),
-	% TODO vytvorit hru na serveri
-	%zatial
-	{ok, NewGamePid} = game:start(), 
-	{ok, NewBackupPid} = game:start(), 
+	BackupServer = find_least_busy_game_server(State#state.game_servers),
+
+	% TODO co ak nie su dostupne ziadne (aspon 2) game servery? 
+	% hodit chybu alebo vratit error
+
+	% create games
+	NewGamePid = game_server:create_game(GameServer, Name, Cards), 
+	NewBackupPid = game_server:create_game(BackupServer, Name, Cards), 
+	pexeso_game:set_main(NewGamePid, NewBackupPid),
+
 	Games = State#state.games,
 	NewGame = #game{name = Name, game_pid = NewGamePid, backup_pid = NewBackupPid},
 	NewState = State#state{games = [NewGame | Games]},
-	%io:format("Unexpected message: ~p~n", [NewState]),
+
 	{noreply, State};
+
 
 % register_game_server
 % zaregistruje novy game server	
@@ -97,7 +110,9 @@ handle_info(Info, State) ->
 	io:format("Unexpected message: ~p~n", [Info]),
 	{noreply, State}.
 
-terminate(_Reason, _State) -> ok.
+terminate(_Reason, _State) -> 
+	io:format("Init server ~p stopped~n", [self()]),
+	ok.
 
 code_change(_Old, State, _Extra) -> {ok, State}.
 

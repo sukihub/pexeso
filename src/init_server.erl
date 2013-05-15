@@ -3,9 +3,9 @@
 -define(DELAY, 10000).
 
 -export([
-	start_link/3,
+	start_link/2,
 	gossip_games/2,
-	create_game/2,
+	create_game/3,
 	get_time/1,	
 	register_game_server/2,
 	stop/1,
@@ -24,7 +24,6 @@
 -record(state, {
 	id,
 	vector_clock,
-	init_servers_count,
 	init_servers,
 	games,
 	game_servers
@@ -45,8 +44,8 @@
 
 % public api
 
-start_link(Name, Id, ServersCount) ->
-	gen_server:start_link({local, Name}, ?MODULE, {Name, Id, ServersCount}, []).
+start_link(Name, OthersNames) ->
+	gen_server:start_link({local, Name}, ?MODULE, {Name, OthersNames}, []).
 
 create_game(Pid, Name, Cards) ->
 	gen_server:cast(Pid, {create_game, Name, Cards}).
@@ -68,14 +67,24 @@ stop(Pid) ->
 % inicializia
 % nacita sa zoznam Pidciek zo suboru
 % do suboru sa prida novovytvoreny (pre ucely testovania takto)
-init({Name, Id, ServersCount}) ->
+init({Name, OthersNames}) ->
+
 	io:format("Init server ~p ~p started~n", [Name, self()]),
-	Pid = self(),
-	%writeline("init_servers.conf",Pid),
-	%InitServers = readlines("init_servers.conf"),
+
+	random:seed(now()),
+
 	VectorClock = dict:new(),
-	State = #state{init_servers = [], games = [], game_servers = [], vector_clock = dict:store(Id,0,VectorClock), id = Id, init_servers_count = ServersCount},
+
+	State = #state{
+		games = [], 
+		game_servers = [], 
+		vector_clock = dict:store(Name, 0, VectorClock), 
+		id = Name, 
+		init_servers = lists:delete(Name, OthersNames)
+	},
+	
 	erlang:send_after(?DELAY, self(), trigger),
+	
 	{ok, State}.
  
 
@@ -95,8 +104,8 @@ handle_cast({create_game, Name, Cards}, State) ->
 	% hodit chybu alebo vratit error
 
 	% create games
-	NewGamePid = game_server:create_game(GameServer, Name, Cards), 
-	NewBackupPid = game_server:create_game(BackupServer, Name, Cards), 
+	NewGamePid = game_server:create_game(GameServer#game_server.pid, Name, Cards), 
+	NewBackupPid = game_server:create_game(BackupServer#game_server.pid, Name, Cards), 
 	pexeso_game:set_main(NewGamePid, NewBackupPid),
 
 	Games = State#state.games,
@@ -106,7 +115,6 @@ handle_cast({create_game, Name, Cards}, State) ->
 	VectorClock = State#state.vector_clock,
 	
 	NewState = State#state{games = [NewGame | Games], vector_clock = time_update(Id, VectorClock)},
-
 	
 	{noreply, NewState};
 
@@ -114,11 +122,16 @@ handle_cast({create_game, Name, Cards}, State) ->
 % register_game_server
 % zaregistruje novy game server	
 handle_cast({register_game_server, GameServerPid}, State) ->
+
 	NewGameServer = #game_server{pid = GameServerPid},
 	GameServers = State#state.game_servers,
+
 	NewState = State#state{game_servers = [NewGameServer | GameServers]},
-	%io:format("Unexpected message: ~p~n", [NewState]),
+
+	io:format("~p known game servers: ~p~n", [NewState#state.id, NewState#state.game_servers]),
+
 	{noreply, NewState};
+
 
 handle_cast({get_time}, State) ->
 	VectorClock = State#state.vector_clock,
@@ -134,7 +147,7 @@ handle_cast({gossip_games, Msg}, State) ->
 	LocalGames = State#state.games,
 	Id = State#state.id,
 	LocalFromTime = time_get(FromId, VectorClock),
-	io:format("~p Received gossip: ~p ~p ~p ~n", [Id, FromGames, FromId, FromTime]),
+	io:format("~p received gossip: ~p ~p ~p ~n", [Id, FromGames, FromId, FromTime]),
 	{RecentTime, RecentGames} = resolve_lists_games(LocalGames, LocalFromTime, FromGames, FromTime),
 	NewState = State#state{games = RecentGames, vector_clock = dict:store(FromId, RecentTime, VectorClock)},
 	{noreply, NewState};
@@ -144,21 +157,25 @@ handle_cast(stop, State) ->
 
 handle_info({'DOWN', _, process, _, _Reason}, _State) ->
 	exit(normal);
+
 	
 handle_info(trigger, State) ->
 	
 	Games = State#state.games,
 	Id = State#state.id,
 	VectorClock = State#state.vector_clock,
-	Count = State#state.init_servers_count,
+	InitServers = State#state.init_servers,
 	CurrentTime = time_get(Id, VectorClock),
-	{ToPid, Msg} = create_gossip_message(Id, Games, CurrentTime, Count), %FromId, List, CurrentTime, InitServersCount
+
+	{ToPid, Msg} = create_gossip_message(Id, Games, CurrentTime, InitServers),
+
 	?MODULE:gossip_games(ToPid, Msg),
 	
-	io:format("init_server_~p: ~p~n", [Id, length(Games)]),
+	io:format("~p: ~p games~n", [Id, length(Games)]),
 	erlang:send_after(?DELAY, self(), trigger),
 	
 	{noreply, State};
+
 
 handle_info(Info, State) ->
 	io:format("Unexpected message: ~p~n", [Info]),
@@ -169,23 +186,6 @@ terminate(_Reason, _State) ->
 	ok.
 
 code_change(_Old, State, _Extra) -> {ok, State}.
-
-
-% zapisanie PID do suboru
-writeline(FileName,Pid) ->
-	file:write_file(FileName, io_lib:fwrite("~p\n", [Pid]), [append]).
-
-% nacitanie vsetkych PID zo suboru
-readlines(FileName) ->
-    {ok, Device} = file:open(FileName, [read]),
-    get_all_lines(Device, []).
-
-get_all_lines(Device, Accum) ->
-    case io:fread(Device, "", "~s") of
-        eof  -> file:close(Device), Accum;
-        {ok, [N]} -> get_all_lines(Device, Accum ++ [list_to_pid(N)])
-    end.
-	
 	
 time_update(Id, VectorClock) ->
 	CurrentTime = dict:fetch(Id,VectorClock),
@@ -210,21 +210,25 @@ resolve_lists_games(CurrentGames,CurrentTime,ColleaguesGames,ColleaguesTime) ->
 		false -> {ColleaguesTime, ColleaguesGames}
 	end.
 
-create_gossip_message(FromId, List, CurrentTime, InitServersCount) ->
-	ToId = random:uniform(InitServersCount),
-	ToPid = list_to_atom("init_server"++lists:flatten(io_lib:format("~p", [ToId]))),
+create_gossip_message(FromId, List, CurrentTime, InitServers) ->
+	
+	ToId = random:uniform(length(InitServers)),
+	ToPid = lists:nth(ToId, InitServers),
 	Msg = {List, FromId, CurrentTime},
+	
 	{ToPid, Msg}.
+
 
 % najdenie game servera s najmenej hrami	
 find_least_busy_game_server([]) ->
 	nil;
-find_least_busy_game_server(GameServers = [H|T]) ->
+find_least_busy_game_server([H|T]) ->
 	find_least_busy_game_server(T, H).
 	
-find_least_busy_game_server([],Min) ->
+find_least_busy_game_server([], Min) ->
 	Min;	
-find_least_busy_game_server(GameServers = [H|T],Min) ->
+
+find_least_busy_game_server([H|T], Min) ->
 	case Min#game_server.games_count > H#game_server.games_count of
 		true -> find_least_busy_game_server(T, H);
 		false -> find_least_busy_game_server(T, Min)

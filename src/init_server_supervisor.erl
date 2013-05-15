@@ -10,11 +10,11 @@ start_link(Names) ->
 	supervisor:start_link({local, ?MODULE}, ?MODULE, Names).
 
 init(Names) ->
-	ChildSpecs = [ generate_childspec(Name) || Name <- Names ],
+	ChildSpecs = [ generate_childspec(Name, Names) || Name <- Names ],
 	{ok, {{one_for_one, 10, 60}, ChildSpecs }}.
 
 
-generate_childspec(Name) ->
+generate_childspec(Name, Names) ->
 	{ Name, 
-		{ init_server, start_link, [Name] }, 
+		{ init_server, start_link, [Name, Names] }, 
 		permanent, 1000, worker, [ init_server ] }.

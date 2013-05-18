@@ -7,7 +7,8 @@
 	start_link/1,
 	set_listening/1,
 	set_sending/2,
-	send/1
+	send/1,
+	stop/1
 ]).
 
 -export([
@@ -46,6 +47,9 @@ set_sending(Pid, MainPid) ->
 
 send(Pid) ->
 	gen_fsm:send_event(Pid, heartbeat).
+
+stop(Pid) ->
+	gen_fsm:send_all_state_event(Pid, stop).
 
 %%
 % PRVATE IMPLEMENTATION
@@ -86,6 +90,9 @@ sending(_Message, S) ->
 sending(_Message, _From, S) ->
 	{reply, unexpected, sending, S, ?SENDING_TIMEOUT}.	
 
+
+handle_event(stop, _StateName, S) ->
+	{stop, normal, S};
 
 handle_event(_Message, StateName, S) ->
 	{next_state, StateName, S}.

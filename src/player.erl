@@ -5,7 +5,7 @@
 -behaviour(pexeso_progress_listener).
  
 -export([
-	start/3,
+	start/2,
 	pexeso_progress/2, 
 	turn_card/2,
 	new_servers/3,
@@ -34,8 +34,8 @@
 
 % PUBLIC INTERFACE
 
-start(GamePid, BackupPid, Name) ->
-	gen_fsm:start(?MODULE, {GamePid, BackupPid, Name}, []).
+start(Pids, Name) ->
+	gen_fsm:start(?MODULE, {Pids, Name}, []).
 
 pexeso_progress(Pid, Action) ->
 	gen_fsm:send_all_state_event(Pid, {pexeso_progress, Action}).
@@ -51,7 +51,7 @@ stop(Pid) ->
 
 % PRIVATE IMPLEMENTATION
 
-init({GamePid, BackupPid, Name}) ->
+init({{GamePid, BackupPid}, Name}) ->
 	
 	pexeso_game:register_player(GamePid, Name, self()),
 
@@ -163,6 +163,10 @@ handle_event({pexeso_progress, Action = #action{move = #join{}}}, _StateName, St
 	io:format("pridal sa hrac: ~p~n", [Action#action.player]),
 	{next_state, playing, State};
 
+handle_event({pexeso_progress, {stop, Stats}}, _StateName, State) ->
+	io:format("hotovo: ~p~n", [Stats]),
+	{stop, normal, State};
+
 %%
 % Hey, here are new main and backup games.
 %
@@ -191,9 +195,6 @@ handle_event(Message, StateName, S) ->
 handle_sync_event(Message, _From, StateName, S) ->
 	unexpected(Message, StateName),
 	{reply, unexpected, StateName, S}.
-
-%handle_info({'DOWN', _, process, _, _Reason}, _State) ->
-%	exit(normal);
 
 handle_info(Info, _StateName, State) ->
 	io:format("Unexpected message: ~p~n", [Info]),

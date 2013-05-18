@@ -6,10 +6,14 @@
 	start_link/2,
 	gossip_games/2,
 	create_game/2,
+	get_games/0,
+	get_game/1,
 	get_time/1,	
+	game_finished/1,
 	register_game_server/1,
-	stop/1,
-	create_gossip_message/4
+	main_down/3,
+	backup_down/3,
+	stop/1
 ]).
 
 -export([ 
@@ -30,16 +34,16 @@
 }).
 
 -record(game, {
+	name,
 	game_pid,
 	backup_pid,
-	name
+	finished = false
 }).
 
--record(game_server, {
-	pid,
-	games_count = 0,
-	dead = 0
-}).
+%-record(game_server, {
+%	pid,
+%	games_count = 0
+%}).
 
 % public api
 
@@ -48,24 +52,48 @@ start_link(Name, OthersNames) ->
 
 create_game(Name, Cards) ->
 	gen_server:cast(pexeso_supervisor:pick_init_server(), {create_game, Name, Cards}).
+
+get_games() ->
+	gen_server:call(pexeso_supervisor:pick_init_server(), get_games).
+
+get_game(Name) ->
+	try_all(pexeso_supervisor:shuffle_init_servers(), {get_game, Name}).
 	
 register_game_server(GameServerPid) ->
 	gen_server:cast(pexeso_supervisor:pick_init_server(), {register_game_server, GameServerPid}).
 	
 get_time(Pid) ->
 	gen_server:cast(Pid, {get_time}).
+
+game_finished(Name) ->
+	gen_server:cast(pexeso_supervisor:pick_init_server(), {game_finished, Name}).
 	
 gossip_games(Pid, Msg) ->
 	gen_server:cast(Pid, {gossip_games, Msg}).
+
+main_down(Name, Main, Backup) ->
+	try_all(pexeso_supervisor:shuffle_init_servers(), {main_down, Name, Main, Backup}).
+
+backup_down(Name, Main, Backup) ->
+	try_all(pexeso_supervisor:shuffle_init_servers(), {backup_down, Name, Main, Backup}).
+
+try_all([ InitServer | InitServers ], Message) ->
+	case gen_server:call(InitServer, Message) of
+		try_next -> try_all(InitServers, Message);
+		Else -> Else
+	end;
+
+try_all([], _Message) ->
+	throw(not_found_on_any_init).
 
 stop(Pid) ->
 	gen_server:cast(Pid, stop).
 
 % gen server stuff
 
-% inicializia
-% nacita sa zoznam Pidciek zo suboru
-% do suboru sa prida novovytvoreny (pre ucely testovania takto)
+%%
+% Init server initialization.
+%
 init({Name, OthersNames}) ->
 
 	io:format("Init server ~p ~p started~n", [Name, self()]),
@@ -75,8 +103,8 @@ init({Name, OthersNames}) ->
 	VectorClock = dict:new(),
 
 	State = #state{
-		games = [], 
-		game_servers = [], 
+		games = dict:new(), 
+		game_servers = sets:new(), 
 		vector_clock = dict:store(Name, 0, VectorClock), 
 		id = Name, 
 		init_servers = lists:delete(Name, OthersNames)
@@ -85,27 +113,95 @@ init({Name, OthersNames}) ->
 	erlang:send_after(?DELAY, self(), trigger),
 	
 	{ok, State}.
- 
 
+ 
+%%
+% Returns "pretty" list of currently running games.
+%
+handle_call(get_games, _From, State) ->
+	Result = [ {G#game.name, G#game.game_pid, G#game.backup_pid} || {_, G} <- dict:to_list(State#state.games) ],
+	{reply, Result, State};
+
+
+%%
+% Returns "pretty" details of given game.
+%
+handle_call({get_game, Name}, _From, State) ->
+	
+	case dict:find(Name, State#state.games) of
+
+		error ->
+			{reply, try_next, State};
+
+		{ok, Game} ->
+			Result = { Game#game.game_pid, Game#game.backup_pid },
+			{reply, Result, State}
+
+	end;
+
+%%
+% Some game reports that its main or backup is down.
+%
+handle_call({Down, Name, MainPid, BackupPid}, _From, State) when Down == main_down; Down == backup_down ->
+
+	case dict:find(Name, State#state.games) of
+			
+		error -> 
+			{reply, try_next, State};
+
+		{ok, Game} ->
+
+			case is_game_running(Down, MainPid, BackupPid) of
+				
+				true -> {reply, nope, State};
+				
+				false -> 
+
+					try						
+						% replace game
+						{NewPid, NewState} = replace_game(Down, Game, MainPid, BackupPid, State),
+
+						% return correct response
+						{reply, {yop, NewPid}, NewState}
+
+					catch
+						throw:not_enough_game_servers -> {reply, try_next, State}
+					end					
+
+			end
+
+	end;
+
+
+%%
+% Do not crash if somebody sends stupid message.
+%
 handle_call(_, _From, State) ->
 	{reply, ok, State}.
 
 
-% create_game
+%%
+% Creates new pexeso game at least busy game servers.
 %
 handle_cast({create_game, Name, Cards}, State) ->
 	
 	try
 
-		Servers = find_least_busy_servers(State#state.game_servers),
-		NewState = initialize_games(Name, Cards, Servers, State),
+		ensure_game_not_exists(Name, State),
+		NewState = initialize_games(Name, Cards, State),
 		
 		{noreply, NewState}
 
 	catch
+
+		throw:game_already_exists ->
+			io:format("Game with name ~p already exists, choose better one~n", [Name]),
+			{noreply, State};
+
 		throw:not_enough_game_servers -> 
 			io:format("~p does not have enough game servers to start new game~n", [State#state.id]),
 			{noreply, State}
+
 	end;
 
 
@@ -113,16 +209,22 @@ handle_cast({create_game, Name, Cards}, State) ->
 % zaregistruje novy game server	
 handle_cast({register_game_server, GameServerPid}, State) ->
 
-	NewGameServer = #game_server{pid = GameServerPid},
-	GameServers = State#state.game_servers,
+	case sets:is_element(GameServerPid, State#state.game_servers) of
 
-	NewState = State#state{game_servers = [NewGameServer | GameServers]},
+		true ->	
+			{noreply, State};
 
-	io:format("~p known game servers: ~p~n", [NewState#state.id, NewState#state.game_servers]),
+		false ->
+			GameServers = sets:add_element(GameServerPid, State#state.game_servers),
+			NewState = State#state{game_servers = GameServers},
 
-	{noreply, NewState};
+			io:format("~p knows new game server: ~p~n", [State#state.id, GameServerPid]),
 
+			{noreply, NewState}
 
+	end;
+
+	
 handle_cast({get_time}, State) ->
 	VectorClock = State#state.vector_clock,
 	Id = State#state.id,
@@ -130,17 +232,32 @@ handle_cast({get_time}, State) ->
 	CurrentTime = time_get(Id, VectorClock),
 	io:format("Unexpected message: ~p~n", [CurrentTime]),
 	{noreply, State};
+
 	
-handle_cast({gossip_games, Msg}, State) ->
-	{FromGames, FromId, FromTime} = Msg,
+handle_cast({gossip_games, {FromGames, FromId, FromTime}}, State) ->
+
 	VectorClock = State#state.vector_clock,
 	LocalGames = State#state.games,
 	Id = State#state.id,
+
 	LocalFromTime = time_get(FromId, VectorClock),
-	io:format("~p received gossip: ~p ~p ~p ~n", [Id, FromGames, FromId, FromTime]),
+		
 	{RecentTime, RecentGames} = resolve_lists_games(LocalGames, LocalFromTime, FromGames, FromTime),
 	NewState = State#state{games = RecentGames, vector_clock = dict:store(FromId, RecentTime, VectorClock)},
+
+	io:format("~p updated games from ~p~nlist: ~p~n", [Id, FromId, dict:to_list(RecentGames)]),
+
 	{noreply, NewState};
+
+
+handle_cast({game_finished, Name}, State) ->
+
+	NewState = State#state{
+		games = dict:update(Name, fun(G) -> G#game{finished = now()} end, State#state.games)
+	},
+
+	{noreply, NewState};
+
 	
 handle_cast(stop, State) ->
 	{stop, normal, State}.
@@ -161,7 +278,6 @@ handle_info(trigger, State) ->
 
 	?MODULE:gossip_games(ToPid, Msg),
 	
-	io:format("~p: ~p games~n", [Id, length(Games)]),
 	erlang:send_after(?DELAY, self(), trigger),
 	
 	{noreply, State};
@@ -209,58 +325,133 @@ create_gossip_message(FromId, List, CurrentTime, InitServers) ->
 	{ToPid, Msg}.
 
 
-% najdenie game serverov s najmenej hrami	
-
-find_least_busy_servers([ G1, G2 | Others ]) when G1#game_server.games_count =< G2#game_server.games_count ->
-	find_least_busy_servers(Others, G1, G2, []);
-	
-find_least_busy_servers([ G1, G2 | Others ]) ->
-	find_least_busy_servers(Others, G2, G1, []);
-
-find_least_busy_servers(GameServers) when is_list(GameServers) ->
-	throw(not_enough_game_servers).
-
-find_least_busy_servers([], Min1, Min2, Rest) ->
-	{ Min1, Min2, Rest };	
-
-find_least_busy_servers([ G | Others ], Min1, Min2, Rest) when G#game_server.games_count < Min1#game_server.games_count ->
-	find_least_busy_servers(Others, G, Min1, [ Min2 | Rest ]);
-
-find_least_busy_servers([ G | Others ], Min1, Min2, Rest) when G#game_server.games_count < Min2#game_server.games_count ->
-	find_least_busy_servers(Others, Min1, G, [ Min2 | Rest ]);
-
-find_least_busy_servers([ G | Others ], Min1, Min2, Rest) ->
-	find_least_busy_servers(Others, Min1, Min2, [ G | Rest ]).
+%%
+% Throws error if game with same name already exists.
+%
+ensure_game_not_exists(Name, State) ->
+	case dict:is_key(Name, State#state.games) of
+		true -> throw(game_already_exists);
+		false -> ok
+	end.
 
 
-initialize_games(Name, Cards, { GameServer, BackupServer, OtherServers }, State) ->
+initialize_games(Name, Cards, State) ->
 
-	% create games
-	NewGamePid = game_server:create_game(GameServer#game_server.pid, Name, Cards), 
-	NewBackupPid = game_server:create_game(BackupServer#game_server.pid, Name, Cards), 
-	pexeso_game:set_main(NewGamePid, NewBackupPid),
+	{MainPid, BackupPid, NewGameServers} = create_games(State#state.game_servers, Name, Cards),
 
-	% update counts of games on both servers
-	NewGameServer = GameServer#game_server{ games_count = GameServer#game_server.games_count + 1 },
-	NewBackupServer = BackupServer#game_server{ games_count = BackupServer#game_server.games_count + 1 },
-
-	% create new game record
-	Games = State#state.games,
-	Id = State#state.id,
-	NewGame = #game{name = Name, game_pid = NewGamePid, backup_pid = NewBackupPid},
-	
-	% update clock
-	VectorClock = State#state.vector_clock,
+	% TODO this line will timeout if either game or backup are not created
+	pexeso_game:set_main(MainPid, BackupPid),
 	
 	% return updated state
 	State#state{
 		
 		% add new game to the list
-		games = [NewGame | Games],
+		games = dict:store(
+			Name, 
+			#game{name = Name, game_pid = MainPid, backup_pid = BackupPid},
+			State#state.games
+		),
 
 		% add updated servers to the list of other servers
-		game_servers = [ NewGameServer, NewBackupServer | OtherServers ],
+		game_servers = NewGameServers,
 		
 		% new vector clock
-		vector_clock = time_update(Id, VectorClock)
+		vector_clock = time_update(State#state.id, State#state.vector_clock)
+
 	}.
+
+
+create_games(GameServers, Name, Cards) ->
+	create_games(shuffle_game_servers(GameServers), GameServers, Name, Cards, null).
+
+
+create_game(GameServers, Name, Cards, Skip) ->
+
+	% game must be on a server different from Skip
+	PossibleServers = sets:del_element(Skip, GameServers),
+
+	create_games(shuffle_game_servers(PossibleServers), GameServers, Name, Cards, just_one).
+
+
+create_games([ Server | Rest ], GameServers, Name, Cards, First) ->
+	
+	try
+	
+		% try to create game	
+		Pid = game_server:create_game(Server, Name, Cards),
+
+		case First of
+
+			% only first game was created, remember it and continue
+			null -> create_games(Rest, GameServers, Name, Cards, Pid);
+
+			% second game was created, we can return
+			_ -> { First, Pid, GameServers }
+
+		end
+
+	catch
+
+		% game server does not exist, or timeouted
+		exit:{Reason, _} when Reason == timeout; Reason == noproc ->
+
+			% recusively find another one
+			create_games(
+				Rest, sets:del_element(Server, GameServers), 
+				Name, Cards, First
+			)
+
+	end;
+
+
+create_games([], _, _, _, _) ->
+	throw(not_enough_game_servers).
+
+
+shuffle_game_servers(Servers) ->
+	RandomList = [{random:uniform(), X} || X <- sets:to_list(Servers)],
+    [X || {_, X} <- lists:sort(RandomList)].
+
+
+replace_game(Down, Game, MainPid, BackupPid, State) ->
+
+	% create new game
+	{just_one, NewPid, GameServers} = create_game(State#state.game_servers, Game#game.name, [], 0),
+
+	NewGame = replace_down_process(Down, Game, MainPid, BackupPid, NewPid),
+
+	io:format("~p replacing game info: ~p -> ~p~n", [self(), Game, NewGame]),
+
+	NewState = State#state{ 
+		games = dict:store(NewGame#game.name, NewGame, State#state.games),
+		game_servers = GameServers
+	},
+
+	{NewPid, NewState}.
+
+
+replace_down_process(main_down, Game, _, BackupPid, NewPid) ->
+	Game#game{
+		game_pid = BackupPid,
+		backup_pid = NewPid
+	};
+
+replace_down_process(backup_down, Game, MainPid, _, NewPid) ->
+	Game#game{
+		game_pid = MainPid,
+		backup_pid = NewPid
+	}.
+
+
+is_game_running(Down, MainPid, BackupPid) ->
+
+	Pid = case Down of
+		main_down -> MainPid;
+		backup_down -> BackupPid
+	end,
+
+	try
+		pexeso_game:get_stats(Pid, 500), true
+	catch
+		exit:{Reason, _} when Reason == timeout; Reason == noproc -> false
+	end.

@@ -4,6 +4,7 @@
 -export([
 	start_link/0,
 	pick_init_server/0,
+	shuffle_init_servers/0,
 	init/1
 ]).
 
@@ -34,3 +35,7 @@ init(_) ->
 
 get_init_servers() ->
 	[ init1, init2, init3 ].
+
+shuffle_init_servers() ->
+    RandomList = [{random:uniform(), X} || X <- get_init_servers()],
+    [X || {_, X} <- lists:sort(RandomList)].

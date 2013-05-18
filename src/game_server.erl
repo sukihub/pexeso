@@ -18,13 +18,17 @@
 
 -define(TIMEOUT, 120000).
 
+-record(state, {
+	games = 0
+}).
+
 % PUBLIC API
 
 start_link() ->
 	gen_server:start_link(?MODULE, nothing, []).
 
 create_game(Pid, Name, Cards) ->
-	gen_server:call(Pid, {create_game, Name, Cards}).
+	gen_server:call(Pid, {create_game, Name, Cards}, 500).
 
 stop(Pid) ->
 	gen_server:cast(Pid, stop).
@@ -34,11 +38,18 @@ stop(Pid) ->
 init(_) ->
 	io:format("Game server ~p stared~n", [self()]),
 	register(),
-	{ok, stateless, ?TIMEOUT}.
+	{ok, #state{}, ?TIMEOUT}.
+
 
 handle_call({create_game, Name, Cards}, _From, State) ->
+	
 	{ok, Game} = pexeso_game:start(Name, Cards),
-	{reply, Game, State, ?TIMEOUT};
+	NewState = State#state{games = State#state.games + 1},
+
+	io:format("Game server ~p had ~p games created~n", [self(), NewState#state.games]),
+
+	{reply, Game, NewState, ?TIMEOUT};
+
 
 handle_call(Message, _From, State) ->
 	unexpected(Message),

@@ -225,7 +225,7 @@ main({turn_card, Name, CardId}, S) ->
 main(no_heartbeat, S) ->
 	
 	% contact init server to see what the hell is going on
-	case tester:backup_down(S#state.name, S#state.other_pid) of
+	case init_server:backup_down(S#state.name, self(), S#state.other_pid) of
 
 		% ignore no_heartbeat event, backup works as expected
 		nope -> 
@@ -249,9 +249,23 @@ main(Message, S) ->
 % Creates reply for turn_card.
 %
 create_main_reply(State) ->
+
 	case pexeso_lib:is_finished(State#state.game) of
-		false -> {next_state, main, State};
-		true  -> {stop, normal, State}
+		
+		false -> 
+			{next_state, main, State};
+
+		true  -> 
+
+			gen_event:notify(
+				State#state.event_manager, 
+				{stop, pexeso_lib:get_stats(State#state.game)}
+			),
+
+			init_server:game_finished(State#state.name),
+
+			{stop, normal, State}
+
 	end.
 
 
@@ -284,12 +298,18 @@ backup({pexeso_progress, Action = #action{}}, S) ->
 	create_backup_reply(State);
 
 %%
+% We are done.
+%
+backup({pexeso_progress, {stop, _}}, S) ->
+	{stop, normal, S};
+
+%%
 % Backup receives gameplay event, which suggests that main is down.
 %
 backup(Message = {Event, _, _}, S) when Event == register_player; Event == turn_card ->
 	
 	% contact init server to see what the hell is going on
-	case tester:main_down(S#state.name, S#state.other_pid) of
+	case init_server:main_down(S#state.name, S#state.other_pid, self()) of
 
 		% ignore gameplay event, main works as expected
 		nope -> 
@@ -307,6 +327,7 @@ backup(Message = {Event, _, _}, S) when Event == register_player; Event == turn_
 			{next_state, main, State}
 
 	end;
+	
 
 backup(Message, S) ->
 	unexpected(Message, backup),
@@ -373,7 +394,9 @@ handle_info(Message, StateName, S) ->
 %%
 % Terminate.
 %
-terminate(_Reason, _StateName, _State) -> ok.
+terminate(_Reason, _StateName, State) -> 
+	pexeso_game_heartbeat:stop(State#state.heartbeat),
+	ok.
 
 %%
 % Code reload.

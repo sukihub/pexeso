@@ -422,7 +422,6 @@ initialize_games(Name, Cards, State) ->
 		game_servers = NewGameServers,
 
 		% new vector clock
-		vector_clock = time_update(State#state.id, State#state.vector_clock),
 		vector_clock_games = time_update(Name, State#state.id, State#state.vector_clock_games)
 	}.
 

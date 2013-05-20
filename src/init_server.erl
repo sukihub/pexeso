@@ -121,7 +121,7 @@ init({Name, OthersNames}) ->
 % Returns "pretty" list of currently running games.
 %
 handle_call(get_games, _From, State) ->
-	Result = [ {G#game.name, G#game.game_pid, G#game.backup_pid} || {_, G} <- dict:to_list(State#state.games) ],
+	Result = [ {G#game.name, G#game.game_pid, G#game.backup_pid, G#game.finished} || {_, G} <- dict:to_list(State#state.games) ],
 	{reply, Result, State};
 
 
@@ -253,7 +253,9 @@ handle_cast({gossip_games, {FromGames, FromInitServerName, FromVectorClockGames}
 handle_cast({game_finished, Name}, State) ->
 
 	NewState = State#state{
-		games = dict:update(Name, fun(G) -> G#game{finished = now()} end, State#state.games)
+		games = dict:update(Name, fun(G) -> G#game{finished = time()} end, State#state.games),
+
+		vector_clock_games = time_update(Name, State#state.id, State#state.vector_clock_games)
 	},
 
 	{noreply, NewState};
@@ -277,9 +279,16 @@ handle_info(trigger, State) ->
 
 	?MODULE:gossip_games(ToPid, Msg),
 
+	NewGames = erase_old_games(Games, dict:fetch_keys(Games)),
+
 	erlang:send_after(?DELAY, self(), trigger),
 
-	{noreply, State};
+	NewState = State#state{
+		% add new game to the list
+		games = NewGames
+	},
+
+	{noreply, NewState};
 
 
 handle_info(Info, State) ->
@@ -373,11 +382,28 @@ resolve_lists_from(Games, VectorClockList, [H|T], FromVectorClockList, InitServe
 			end;
 
 		false ->
-			% uses value and time of remote init_server
-			NewVectorClockList = time_set(Name, InitServerName, VectorClockList, InitServerName),
-			resolve_lists_from(dict:store(Name, Value, Games), NewVectorClockList, T, FromVectorClockList, InitServerName)
-
+			case Value#game.finished == false of
+				false ->
+					resolve_lists_from(Games, VectorClockList, T, FromVectorClockList, InitServerName);
+				true ->
+					% uses value and time of remote init_server
+					NewVectorClockList = time_set(Name, InitServerName, VectorClockList, InitServerName),
+					resolve_lists_from(dict:store(Name, Value, Games), NewVectorClockList, T, FromVectorClockList, InitServerName)
+			end
 	end.
+
+
+erase_old_games(Dictionary, []) ->
+	Dictionary;
+erase_old_games(Dictionary, [H|T]) ->
+	Game =  dict:fetch(H, Dictionary),
+	case (Game#game.finished /= false andalso calendar:time_to_seconds(time()) - calendar:time_to_seconds(Game#game.finished) > 30) of
+		true ->
+			erase_old_games(dict:erase(H, Dictionary), T);
+		false ->
+			erase_old_games(Dictionary, T)
+	end.
+
 
 %%
 % Creates messages to be used for gossiping

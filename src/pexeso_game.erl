@@ -20,6 +20,7 @@
 	pexeso_progress/2,
 	no_heartbeat/1,
 
+	request_new_pids/1,
 	stop/1
 ]).
 
@@ -89,6 +90,9 @@ get_stats(Pid) ->
 
 get_stats(Pid, Timeout) ->
 	gen_fsm:sync_send_all_state_event(Pid, get_stats, Timeout).
+
+request_new_pids(Pid) ->
+	gen_fsm:sync_send_all_state_event(Pid, request_new_pids).
 
 pause(Pid) ->
 	gen_fsm:send_all_state_event(Pid, pause).
@@ -373,6 +377,12 @@ handle_sync_event(get_playground, _From, StateName, S) ->
 	Cards = pexeso_lib:get_playground(S#state.game),
 	{reply, Cards, StateName, S};
 
+
+handle_sync_event(request_new_pids, _From, StateName, S) -> 
+	io:format("Sending new pids~n"),
+	Pids = { self(), S#state.other_pid },
+	{reply, Pids, StateName, S};
+
 %%
 % Returns statistics of current game.
 %
@@ -418,7 +428,7 @@ new_backup(NewBackupPid, S) ->
 	State = advance_to_main(NewBackupPid, S),
 
 	% notify players about the change
-	[ player:new_servers(PlayerPid, self(), NewBackupPid) || {_, PlayerPid} <- dict:to_list(State#state.players) ],
+	[ websocket_player:new_servers(PlayerPid, self(), NewBackupPid) || {_, PlayerPid} <- dict:to_list(State#state.players) ],
 
 	State.
 

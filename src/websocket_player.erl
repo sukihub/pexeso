@@ -32,6 +32,7 @@
 	game_pid,
 	backup_pid,
 	last_action = null,
+	redoing = false,
 	websocket
 }).
 
@@ -69,7 +70,8 @@ init({{GamePid, BackupPid}, Name, WebSocket}) ->
 		game_pid = GamePid,
 		backup_pid = BackupPid,
 		last_action = join,
-		websocket = WebSocket
+		websocket = WebSocket,
+		redoing = false
 	},
 
 	{ok, waiting, State, ?CLIENT_WAIT}.
@@ -96,7 +98,8 @@ playing({turn_card, CardId}, S) ->
 
 	% remember last action	
 	State = S#state{
-		last_action = {turn, CardId}
+		last_action = {turn, CardId},
+		redoing = false
 	},
 
 	% execute action
@@ -118,10 +121,15 @@ playing(Message, _From, S) ->
 % Main game server did not respond.
 %
 waiting(timeout, S) ->
+	
 	% Redo action on backup server
 	redo_last_action(S#state.backup_pid, S),
+	State = S#state{ redoing = true },
+
 	% Wait for reply from backup server
-	wait_for_backup_reply(S);
+	wait_for_backup_reply(State);
+
+
 
 waiting(Message, S) ->
 	unexpected(Message, waiting),
@@ -137,8 +145,12 @@ waiting(Message, _From, S) ->
 waiting_backup(timeout, S) ->
 	% log, haha ;-)
 	io:format("Both main game and backup game did not reply, ~p idely sitting~n", [S#state.name]),
+
+	State = S#state{redoing = false},
+
 	% go to idle and wait for new game and backup servers
-	{next_state, idle, S, 10000};
+	{next_state, idle, State, 10000};
+
 
 waiting_backup(Message, S) ->
 	unexpected(Message, waiting_backup),
@@ -165,7 +177,7 @@ handle_event({pexeso_progress, Action = #action{move = #turn{}}}, _StateName, St
 
 	State#state.websocket ! {text, Json},
 
-	{next_state, playing, State};
+	{next_state, playing, check_for_redo(State)};
 
 
 handle_event({pexeso_progress, Action = #action{move = #close{}}}, _StateName, State) ->
@@ -182,7 +194,7 @@ handle_event({pexeso_progress, Action = #action{move = #close{}}}, _StateName, S
 
 	State#state.websocket ! {text, Json},
 
-	{next_state, playing, State};
+	{next_state, playing, check_for_redo(State)};
 
 
 handle_event({pexeso_progress, Action = #action{move = #pick{}}}, _StateName, State) ->
@@ -200,7 +212,7 @@ handle_event({pexeso_progress, Action = #action{move = #pick{}}}, _StateName, St
 
 	State#state.websocket ! {text, Json},
 
-	{next_state, playing, State};
+	{next_state, playing, check_for_redo(State)};
 
 
 handle_event({pexeso_progress, Action = #action{move = #fail{}}}, _StateName, State) ->
@@ -218,12 +230,12 @@ handle_event({pexeso_progress, Action = #action{move = #fail{}}}, _StateName, St
 
 	State#state.websocket ! {text, Json},
 
-	{next_state, playing, State};
+	{next_state, playing, check_for_redo(State)};
 
 
 handle_event({pexeso_progress, Action = #action{move = #invalid{}}}, _StateName, State) ->
 	io:format("neplatny tah: ~p~n", [Action]),
-	{next_state, playing, State};
+	{next_state, playing, check_for_redo(State)};
 
 
 handle_event({pexeso_progress, Action = #action{move = #join{}}}, _StateName, State) ->
@@ -234,7 +246,7 @@ handle_event({pexeso_progress, Action = #action{move = #join{}}}, _StateName, St
 	
 	State#state.websocket ! {text, Json},
 
-	{next_state, playing, State};
+	{next_state, playing, check_for_redo(State)};
 
 
 handle_event({pexeso_progress, {stop, _Stats}}, _StateName, State) ->
@@ -271,9 +283,11 @@ handle_event(Message, StateName, S) ->
 	{next_state, StateName, S}.
 
 handle_sync_event(get_stats, _From, StateName, S) ->
+	% TODO what if main is down
 	{reply, pexeso_game:get_stats(S#state.game_pid), StateName, S};
 
 handle_sync_event(get_playground, _From, StateName, S) ->
+	% TODO what if backup is down
 	{reply, pexeso_game:get_playground(S#state.game_pid), StateName, S};
 
 handle_sync_event(Message, _From, StateName, S) ->
@@ -323,3 +337,16 @@ create_json_command(Name, Params) ->
 			{params, {struct, Params}}
 		]}		
 	).
+
+check_for_redo(State) ->
+	case State#state.redoing of
+		true ->
+			io:format("~p was redoing, requesting new game pids~n", [State#state.name]),
+			{MainPid, BackupPid} = pexeso_game:request_new_pids(State#state.backup_pid),
+			State#state{
+				game_pid = MainPid,
+				backup_pid = BackupPid
+			};
+		false ->
+			State
+	end.

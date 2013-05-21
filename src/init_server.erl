@@ -48,7 +48,7 @@
 % public api
 
 start_link(Name, OthersNames) ->
-	gen_server:start_link({local, Name}, ?MODULE, {Name, OthersNames}, []).
+	gen_server:start_link(?MODULE, {Name, OthersNames}, []).
 
 create_game(Name, Cards) ->
 	gen_server:cast(pexeso_supervisor:pick_init_server(), {create_game, Name, Cards}).
@@ -62,14 +62,14 @@ get_game(Name) ->
 register_game_server(GameServerPid) ->
 	gen_server:cast(pexeso_supervisor:pick_init_server(), {register_game_server, GameServerPid}).
 	
-get_time(Pid) ->
-	gen_server:cast(Pid, {get_time}).
+get_time(Name) ->
+	gen_server:cast(global:whereis_name(Name), {get_time}).
 
 game_finished(Name) ->
 	gen_server:cast(pexeso_supervisor:pick_init_server(), {game_finished, Name}).
 	
-gossip_games(Pid, Msg) ->
-	gen_server:cast(Pid, {gossip_games, Msg}).
+gossip_games(Name, Msg) ->
+	gen_server:cast(global:whereis_name(Name), {gossip_games, Msg}).
 
 main_down(Name, Main, Backup) ->
 	try_all(pexeso_supervisor:shuffle_init_servers(), {main_down, Name, Main, Backup}).
@@ -78,7 +78,8 @@ backup_down(Name, Main, Backup) ->
 	try_all(pexeso_supervisor:shuffle_init_servers(), {backup_down, Name, Main, Backup}).
 
 try_all([ InitServer | InitServers ], Message) ->
-	case gen_server:call(InitServer, Message) of
+	Pid = global:whereis_name(InitServer),
+	case gen_server:call(Pid, Message) of
 		try_next -> try_all(InitServers, Message);
 		Else -> Else
 	end;
@@ -86,8 +87,8 @@ try_all([ InitServer | InitServers ], Message) ->
 try_all([], _Message) ->
 	throw(not_found_on_any_init).
 
-stop(Pid) ->
-	gen_server:cast(Pid, stop).
+stop(Name) ->
+	gen_server:cast(global:whereis_name(Name), stop).
 
 % gen server stuff
 
@@ -96,6 +97,7 @@ stop(Pid) ->
 %
 init({Name, OthersNames}) ->
 
+	global:register_name(Name, self()),
 	io:format("Init server ~p ~p started~n", [Name, self()]),
 
 	random:seed(now()),
@@ -119,7 +121,7 @@ init({Name, OthersNames}) ->
 % Returns "pretty" list of currently running games.
 %
 handle_call(get_games, _From, State) ->
-	Result = [ {G#game.name, G#game.game_pid, G#game.backup_pid} || {_, G} <- dict:to_list(State#state.games) ],
+	Result = [ {G#game.name, G#game.game_pid, G#game.backup_pid} || {_, G} <- dict:to_list(State#state.games), G#game.finished == false ],
 	{reply, Result, State};
 
 

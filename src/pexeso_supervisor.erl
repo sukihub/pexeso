@@ -15,7 +15,7 @@ start_link() ->
 pick_init_server() ->
 	InitServers = get_init_servers(),
 	I = random:uniform(length(InitServers)),
-	lists:nth(I, InitServers).
+	global:whereis_name(lists:nth(I, InitServers)).
 
 init(_) ->
 

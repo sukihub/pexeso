@@ -36,10 +36,16 @@ create(CardTypes) ->
 % Adds new player.
 %
 add_player(State, Name) ->
+
+	Player = case dict:find(Name, State#state.players) of
+		error -> #player{};
+		{ok, P} -> P
+	end,
+
 	State#state{
 		players = dict:store(
 			Name, 
-			#player{name = Name}, 
+			Player#player{name = Name}, 
 			State#state.players
 		) 
 	}.
@@ -88,7 +94,7 @@ apply_action(State, Action) ->
 	% update state based on the action
 	State#state{
 		playground = update_playground(Action#action.move, State#state.playground),
-		players = update_players(State#state.players, Name, Player)
+		players = update_players(Action#action.move, State#state.players, Name, Player)
 	}.
 
 %%
@@ -198,7 +204,21 @@ update_playground(_, Playground) -> Playground.
 %%
 % Sets updated player in players dictionary.
 %
-update_players(Players, Key, Player) ->
+update_players(Move = #pick{}, Players, Key, Player) ->
+	
+	dict:map(
+		fun(_, P) ->
+			if 
+				P#player.last_card == Move#pick.card_a; P#player.last_card == Move#pick.card_b ->
+					P#player{last_card = null};
+				true -> 
+					P
+			end
+		end,
+		dict:store(Key, Player, Players)
+	);
+
+update_players(_Move, Players, Key, Player) ->
 	dict:store(Key, Player, Players).
 
 %%

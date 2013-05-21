@@ -5,8 +5,10 @@
 -export([
 	start_link/2,
 	gossip_games/2,
+	gossip_game_servers/2,
 	create_game/2,
 	get_games/0,
+	get_game_servers/0,
 	get_game/1,
 	get_time/2,
 	game_finished/1,
@@ -42,10 +44,9 @@
 	finished = false
 }).
 
-%-record(game_server, {
-%	pid,
-%	games_count = 0
-%}).
+-record(game_server, {
+	finished = false
+}).
 
 % public api
 
@@ -57,6 +58,9 @@ create_game(Name, Cards) ->
 
 get_games() ->
 	gen_server:call(pexeso_supervisor:pick_init_server(), get_games).
+
+get_game_servers() ->
+	gen_server:call(pexeso_supervisor:pick_init_server(), get_game_servers).
 
 get_game(Name) ->
 	try_all(pexeso_supervisor:shuffle_init_servers(), {get_game, Name}).
@@ -72,6 +76,9 @@ game_finished(Name) ->
 
 gossip_games(Pid, Msg) ->
 	gen_server:cast(Pid, {gossip_games, Msg}).
+
+gossip_game_servers(Pid, Msg) ->
+	gen_server:cast(Pid, {gossip_game_servers, Msg}).
 
 main_down(Name, Main, Backup) ->
 	try_all(pexeso_supervisor:shuffle_init_servers(), {main_down, Name, Main, Backup}).
@@ -106,7 +113,7 @@ init({Name, OthersNames}) ->
 
 	State = #state{
 		games = dict:new(),
-		game_servers = sets:new(),
+		game_servers = dict:new(),
 		vector_clock = dict:store(Name, 0, VectorClock),
 		id = Name,
 		init_servers = lists:delete(Name, OthersNames)
@@ -121,9 +128,15 @@ init({Name, OthersNames}) ->
 % Returns "pretty" list of currently running games.
 %
 handle_call(get_games, _From, State) ->
-	Result = [ {G#game.name, G#game.game_pid, G#game.backup_pid, G#game.finished} || {_, G} <- dict:to_list(State#state.games) ],
+	Result = [ {G#game.name, G#game.game_pid, G#game.backup_pid} || {_, G} <- dict:to_list(State#state.games) ],
 	{reply, Result, State};
 
+%%
+% Returns list of currently running games.
+%
+handle_call(get_game_servers, _From, State) ->
+	Result = [ {G#game_server.finished} || {_, G} <- dict:to_list(State#state.game_servers) ],
+	{reply, Result, State};
 
 %%
 % Returns "pretty" details of given game.
@@ -211,14 +224,23 @@ handle_cast({create_game, Name, Cards}, State) ->
 % zaregistruje novy game server
 handle_cast({register_game_server, GameServerPid}, State) ->
 
-	case sets:is_element(GameServerPid, State#state.game_servers) of
+	case dict:is_key(GameServerPid, State#state.game_servers) of
 
 		true ->
 			{noreply, State};
 
 		false ->
-			GameServers = sets:add_element(GameServerPid, State#state.game_servers),
-			NewState = State#state{game_servers = GameServers},
+			GameServers = dict:store(
+				GameServerPid,
+				#game_server{},
+				State#state.game_servers),
+			NewState = State#state{
+
+				game_servers = GameServers,
+
+				vector_clock_game_servers = time_update(GameServerPid, State#state.id, State#state.vector_clock_game_servers)
+
+			},
 
 			io:format("~p knows new game server: ~p~n", [State#state.id, GameServerPid]),
 
@@ -242,10 +264,23 @@ handle_cast({gossip_games, {FromGames, FromInitServerName, FromVectorClockGames}
 	LocalGames = State#state.games,
 	Id = State#state.id,
 
-	{RecentGames, RecentVectorClockGames} = resolve_lists_games(LocalGames, VectorClockGames, FromGames, FromVectorClockGames, FromInitServerName),
+	{RecentGames, RecentVectorClockGames} = resolve_list(game, LocalGames, VectorClockGames, FromGames, FromVectorClockGames, FromInitServerName),
 	NewState = State#state{games = RecentGames, vector_clock_games = RecentVectorClockGames},
 
 	io:format("~p updated games from ~p~nlist: ~p~n", [Id, FromInitServerName, dict:fetch_keys(RecentGames)]),
+
+	{noreply, NewState};
+
+handle_cast({gossip_game_servers, {FromGameServers, FromInitServerName, FromVectorClockGameServers}}, State) ->
+
+	VectorClockGames = State#state.vector_clock_game_servers,
+	LocalGames = State#state.game_servers,
+	Id = State#state.id,
+
+	{RecentGames, RecentVectorClockGames} = resolve_list(game_server, LocalGames, VectorClockGames, FromGameServers, FromVectorClockGameServers, FromInitServerName),
+	NewState = State#state{game_servers = RecentGames, vector_clock_game_servers = RecentVectorClockGames},
+
+	io:format("~p updated game servers from ~p~nlist: ~p~n", [Id, FromInitServerName, dict:fetch_keys(RecentGames)]),
 
 	{noreply, NewState};
 
@@ -271,21 +306,27 @@ handle_info({'DOWN', _, process, _, _Reason}, _State) ->
 handle_info(trigger, State) ->
 
 	Games = State#state.games,
+	GameServers = State#state.game_servers,
 	Id = State#state.id,
 	VectorClockGames = State#state.vector_clock_games,
+	VectorClockGameServers = State#state.vector_clock_game_servers,
 	InitServers = State#state.init_servers,
 
-	{ToPid, Msg} = create_gossip_message(Id, Games, VectorClockGames, InitServers),
+	{ToPid, MsgGames} = create_gossip_message(Id, Games, VectorClockGames, InitServers),
+	{ToPid2, MsgGameServers} = create_gossip_message(Id, GameServers, VectorClockGameServers, InitServers),
 
-	?MODULE:gossip_games(ToPid, Msg),
+	?MODULE:gossip_games(ToPid, MsgGames),
+	?MODULE:gossip_game_servers(ToPid2, MsgGameServers),
 
-	NewGames = erase_old_games(Games, dict:fetch_keys(Games)),
+	NewGames = erase_old_elements(game, Games, dict:fetch_keys(Games)),
+	NewGameServers = erase_old_elements(game_server, GameServers, dict:fetch_keys(GameServers)),
 
 	erlang:send_after(?DELAY, self(), trigger),
 
 	NewState = State#state{
 		% add new game to the list
-		games = NewGames
+		games = NewGames,
+		game_servers = NewGameServers
 	},
 
 	{noreply, NewState};
@@ -350,16 +391,22 @@ time_get(GameName, InitServerName, VectorClockList) ->
 %%
 % Merges two lists (local and remote) with respect to the vector clocks
 %
-resolve_lists_games(Games, VectorClockList, FromGames, FromVectorClockList, InitServerName) ->
-	{NewGames, NewVectorClockList} = resolve_lists_from(Games, VectorClockList, dict:to_list(FromGames), FromVectorClockList, InitServerName),
+resolve_list(Type, Games, VectorClockList, FromGames, FromVectorClockList, InitServerName) ->
+	{NewGames, NewVectorClockList} = resolve_list_from(Type, Games, VectorClockList, dict:to_list(FromGames), FromVectorClockList, InitServerName),
 	{NewGames, NewVectorClockList}.
 
-resolve_lists_from(Games, VectorClockList, [], _, _) ->
+resolve_list_from(_, Games, VectorClockList, [], _, _) ->
 	{Games, VectorClockList};
 
-resolve_lists_from(Games, VectorClockList, [H|T], FromVectorClockList, InitServerName) ->
-	{Key, Value} = H,
-	Name = Key,
+resolve_list_from(Type, Games, VectorClockList, [H|T], FromVectorClockList, InitServerName) ->
+	{Name, Value} = H,
+
+	case Type of
+		game ->
+			Finished = Value#game.finished;
+		game_server ->
+			Finished = Value#game_server.finished
+	end,
 
 	% checks if game in remote init_server exists in local init_server
 	case dict:is_key(Name, Games) of
@@ -373,35 +420,41 @@ resolve_lists_from(Games, VectorClockList, [H|T], FromVectorClockList, InitServe
 
 				true ->
 					% keeps local values
-					resolve_lists_from(Games, VectorClockList, T, FromVectorClockList, InitServerName);
+					resolve_list_from(Type, Games, VectorClockList, T, FromVectorClockList, InitServerName);
 
 				false ->
 					% uses value and time of remote init_server
 					NewVectorClockList = time_set(Name, InitServerName, VectorClockList, InitServerName),
-					resolve_lists_from(dict:store(Name, Value, Games), NewVectorClockList, T, FromVectorClockList, InitServerName)
+					resolve_list_from(Type, dict:store(Name, Value, Games), NewVectorClockList, T, FromVectorClockList, InitServerName)
 			end;
 
 		false ->
-			case Value#game.finished == false of
+			case Finished == false of
 				false ->
-					resolve_lists_from(Games, VectorClockList, T, FromVectorClockList, InitServerName);
+					resolve_list_from(Type, Games, VectorClockList, T, FromVectorClockList, InitServerName);
 				true ->
 					% uses value and time of remote init_server
 					NewVectorClockList = time_set(Name, InitServerName, VectorClockList, InitServerName),
-					resolve_lists_from(dict:store(Name, Value, Games), NewVectorClockList, T, FromVectorClockList, InitServerName)
+					resolve_list_from(Type, dict:store(Name, Value, Games), NewVectorClockList, T, FromVectorClockList, InitServerName)
 			end
 	end.
 
 
-erase_old_games(Dictionary, []) ->
+erase_old_elements(_, Dictionary, []) ->
 	Dictionary;
-erase_old_games(Dictionary, [H|T]) ->
-	Game =  dict:fetch(H, Dictionary),
-	case (Game#game.finished /= false andalso calendar:time_to_seconds(time()) - calendar:time_to_seconds(Game#game.finished) > 30) of
+erase_old_elements(Type, Dictionary, [H|T]) ->
+	Element = dict:fetch(H, Dictionary),
+	case Type of
+		game ->
+			Finished = Element#game.finished;
+		game_server ->
+			Finished = Element#game_server.finished
+	end,
+	case (Finished /= false andalso calendar:time_to_seconds(time()) - calendar:time_to_seconds(Finished) > 30) of
 		true ->
-			erase_old_games(dict:erase(H, Dictionary), T);
+			erase_old_elements(Type, dict:erase(H, Dictionary), T);
 		false ->
-			erase_old_games(Dictionary, T)
+			erase_old_elements(Type, Dictionary, T)
 	end.
 
 
@@ -429,7 +482,7 @@ ensure_game_not_exists(Name, State) ->
 
 initialize_games(Name, Cards, State) ->
 
-	{MainPid, BackupPid, NewGameServers} = create_games(State#state.game_servers, Name, Cards),
+	{MainPid, BackupPid, NewGameServers, NewVectorClock} = create_games(State#state.game_servers, Name, Cards, State#state.vector_clock_game_servers, State#state.id),
 
 	% TODO this line will timeout if either game or backup are not created
 	pexeso_game:set_main(MainPid, BackupPid),
@@ -446,25 +499,26 @@ initialize_games(Name, Cards, State) ->
 
 		% add updated servers to the list of other servers
 		game_servers = NewGameServers,
+		vector_clock_game_servers = NewVectorClock,
 
 		% new vector clock
 		vector_clock_games = time_update(Name, State#state.id, State#state.vector_clock_games)
 	}.
 
 
-create_games(GameServers, Name, Cards) ->
-	create_games(shuffle_game_servers(GameServers), GameServers, Name, Cards, null).
+create_games(GameServers, Name, Cards, VectorClock, InitServer) ->
+	create_games(shuffle_game_servers(GameServers), GameServers, Name, Cards, VectorClock, InitServer, null).
 
 
-create_game(GameServers, Name, Cards, Skip) ->
+create_game(GameServers, Name, Cards, VectorClock, InitServer, Skip) ->
 
 	% game must be on a server different from Skip
-	PossibleServers = sets:del_element(Skip, GameServers),
+	PossibleServers = dict:erase(Skip, GameServers),
 
-	create_games(shuffle_game_servers(PossibleServers), GameServers, Name, Cards, just_one).
+	create_games(shuffle_game_servers(PossibleServers), GameServers, Name, Cards, VectorClock, InitServer, just_one).
 
 
-create_games([ Server | Rest ], GameServers, Name, Cards, First) ->
+create_games([ Server | Rest ], GameServers, Name, Cards, VectorClock, InitServer, First) ->
 
 	try
 
@@ -474,10 +528,10 @@ create_games([ Server | Rest ], GameServers, Name, Cards, First) ->
 		case First of
 
 			% only first game was created, remember it and continue
-			null -> create_games(Rest, GameServers, Name, Cards, Pid);
+			null -> create_games(Rest, GameServers, Name, Cards, VectorClock, InitServer, Pid);
 
 			% second game was created, we can return
-			_ -> { First, Pid, GameServers }
+			_ -> { First, Pid, GameServers, VectorClock }
 
 		end
 
@@ -488,34 +542,36 @@ create_games([ Server | Rest ], GameServers, Name, Cards, First) ->
 
 			% recusively find another one
 			create_games(
-				Rest, sets:del_element(Server, GameServers),
-				Name, Cards, First
+				Rest, dict:store(Server, #game_server{finished = time()}, GameServers),
+				Name, Cards, time_update(Server, InitServer, VectorClock), InitServer, First
 			)
 
 	end;
 
 
-create_games([], _, _, _, _) ->
+create_games([], _, _, _, _, _, _) ->
 	throw(not_enough_game_servers).
 
 
 shuffle_game_servers(Servers) ->
-	RandomList = [{random:uniform(), X} || X <- sets:to_list(Servers)],
+	RandomList = [{random:uniform(), X} || X <- dict:fetch_keys(Servers)],
     [X || {_, X} <- lists:sort(RandomList)].
 
 
 replace_game(Down, Game, MainPid, BackupPid, State) ->
 
 	% create new game
-	{just_one, NewPid, GameServers} = create_game(State#state.game_servers, Game#game.name, [], 0),
+	{just_one, NewPid, GameServers, VectorClock} = create_game(State#state.game_servers, Game#game.name, [], State#state.vector_clock_game_servers, State#state.id, 0),
 
 	NewGame = replace_down_process(Down, Game, MainPid, BackupPid, NewPid),
 
 	io:format("~p replacing game info: ~p -> ~p~n", [self(), Game, NewGame]),
 
 	NewState = State#state{
+
 		games = dict:store(NewGame#game.name, NewGame, State#state.games),
-		game_servers = GameServers
+		game_servers = GameServers,
+		vector_clock_game_servers = VectorClock
 	},
 
 	{NewPid, NewState}.

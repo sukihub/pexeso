@@ -10,7 +10,6 @@
 	get_games/0,
 	get_game_servers/0,
 	get_game/1,
-	get_time/2,
 	game_finished/1,
 	register_game_server/1,
 	main_down/3,
@@ -77,8 +76,8 @@ game_finished(Name) ->
 gossip_games(Name, Msg) ->
 	gen_server:cast(global:whereis_name(Name), {gossip_games, Msg}).
 
-gossip_game_servers(Pid, Msg) ->
-	gen_server:cast(Pid, {gossip_game_servers, Msg}).
+gossip_game_servers(Name, Msg) ->
+	gen_server:cast(global:whereis_name(Name), {gossip_game_servers, Msg}).
 
 main_down(Name, Main, Backup) ->
 	try_all(pexeso_supervisor:shuffle_init_servers(), {main_down, Name, Main, Backup}).
@@ -269,7 +268,7 @@ handle_cast({gossip_games, {FromGames, FromInitServerName, FromVectorClockGames}
 	{RecentGames, RecentVectorClockGames} = resolve_list(game, LocalGames, VectorClockGames, FromGames, FromVectorClockGames, FromInitServerName),
 	NewState = State#state{games = RecentGames, vector_clock_games = RecentVectorClockGames},
 
-	io:format("~p updated games from ~p~nlist: ~p~n", [Id, FromInitServerName, dict:fetch_keys(RecentGames)]),
+	io:format("~p updated games from ~p~n", [Id, FromInitServerName, dict:fetch_keys(RecentGames)]),
 
 	{noreply, NewState};
 
@@ -282,7 +281,7 @@ handle_cast({gossip_game_servers, {FromGameServers, FromInitServerName, FromVect
 	{RecentGames, RecentVectorClockGames} = resolve_list(game_server, LocalGames, VectorClockGames, FromGameServers, FromVectorClockGameServers, FromInitServerName),
 	NewState = State#state{game_servers = RecentGames, vector_clock_game_servers = RecentVectorClockGames},
 
-	io:format("~p updated game servers from ~p~nlist: ~p~n", [Id, FromInitServerName, dict:fetch_keys(RecentGames)]),
+	io:format("~p updated game servers from ~p~n", [Id, FromInitServerName, dict:fetch_keys(RecentGames)]),
 
 	{noreply, NewState};
 
@@ -452,7 +451,7 @@ erase_old_elements(Type, Dictionary, [H|T]) ->
 		game_server ->
 			Finished = Element#game_server.finished
 	end,
-	case (Finished /= false andalso calendar:time_to_seconds(time()) - calendar:time_to_seconds(Finished) > 30) of
+	case (Finished /= false andalso calendar:time_to_seconds(time()) - calendar:time_to_seconds(Finished) > 60) of
 		true ->
 			erase_old_elements(Type, dict:erase(H, Dictionary), T);
 		false ->

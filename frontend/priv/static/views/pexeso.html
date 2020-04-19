@@ -1,0 +1,94 @@
+<style type="text/css">
+
+    div.card {
+        float: left;
+        margin: 0 10px 10px 0;
+        cursor: pointer;
+        width: 110px;
+        height: 110px;
+    }
+
+    div.card .number, div.card .image {
+        width: 100px;
+        height: 100px;        
+    }
+
+    div.card .number {
+        font-size: 50px;
+        font-weight: bold;
+        text-align: center;
+
+        color: #AAAAAA;
+
+        display: table-cell;
+        vertical-align: middle;
+    }
+
+</style>
+
+<div class="container" ng-controller="PexesoController">
+
+    <div class="page-header">
+        <a href="#/" class="pull-right btn btn-info">
+            <i class="icon-chevron-left"/>
+            List of games
+        </a>
+        <h1>Pexeso: {{game_name}}</h1> 
+    </div>
+
+    <div class="row">
+        <div class="span12">
+            <form class="form-inline">
+                <label>
+                    Pick a name:
+                    <input type="text" placeholder="Johnny" ng-model="nickname" ng-disabled="playing" />
+                </label>
+                <button type="submit" class="btn btn-success" ng-disabled="nickname.length == 0 || playing" ng-click="join()">
+                    <i class="icon-ok" />
+                    Join
+                </button>
+            </form>
+        </div>
+    </div>
+
+    <div class="row" ng-show="playing">
+        <div class="span8 clearfix">
+
+            <div class="card" ng-repeat="card in playground">
+                <div class="img-polaroid" ng-show="shouldShowCard(card)" ng-click="clicked($index)">
+                    <div class="number" ng-show="!shouldShowContent(card)">
+                        {{card}}
+                    </div>
+                    <div class="image" ng-show="shouldShowContent(card)">
+                        <img src="/static/img/{{card}}.png" />
+                    </div>
+                </div>
+            </div>
+            
+        </div>
+
+        <div class="span1"></div>
+
+        <div class="span3">
+
+            <table class="table table-stripped table-bordered table-condensed">
+                <thead>
+                    <tr>
+                        <th>Player</th>
+                        <th>Turns</th>
+                        <th>Picks</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr ng-repeat="(name, stat) in stats">
+                        <td>{{name}}</td>
+                        <td>{{stat.turns}}</td>
+                        <td>{{stat.picks}}</td>
+                    </tr>
+                </tbody>
+            </table>
+
+        </div>
+    </div>
+
+</div>

@@ -1,0 +1,54 @@
+<div class="container" ng-controller="GamesController">
+
+    <div class="page-header">
+        <h1>Running pexeso games</h1> 
+    </div>
+
+    <div class="row">
+        <div class="span6">
+
+            <form>
+                <legend>Join an existing game
+
+                    <div class="pull-right">
+                        <button type="submit" class="btn btn-mini btn-info" ng-click="refresh()">
+                            <i class="icon-refresh" />
+                            Refresh
+                        </button>
+                    </div>
+
+                </legend>
+
+                
+            </form>
+
+            <ul class="nav nav-pills nav-stacked">
+                <li ng-repeat="game in games">
+                    <a href="#/pexeso/{{game.name}}">{{game.name}}</a>
+                </li>
+            </ul>
+            
+        </div>
+
+        <div class="span1"></div>
+
+        <div class="span5">
+
+            <form class="form-horizontal">
+                <legend>Or create a new one</legend>
+                <label class="clearfix">
+                    Name of the new game:
+                    <input type="text" placeholder="Fancy cars pexeso" ng-model="new_game_name" class="pull-right"/>
+                </label>
+                <div>
+                    <button type="submit" class="pull-right btn btn-success" ng-click="create()" ng-disabled="new_game_name.length == 0">
+                        <i class="icon-th" />
+                        Create
+                    </button>
+                </div>
+            </form> 
+
+        </div>
+    </div>
+
+</div>
